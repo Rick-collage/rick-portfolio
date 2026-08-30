@@ -87,6 +87,66 @@ function extractImdbId(input) {
   return null;
 }
 
+/** Parse Rotten Tomatoes URL → { title, year, mediaKind } */
+function parseRottenTomatoesLink(input) {
+  const value = String(input || "").trim();
+  if (!value) return null;
+
+  // /m/slug or /tv/slug or /tv/slug/s01
+  const m = value.match(
+    /rottentomatoes\.com\/(m|tv)\/([a-z0-9_]+)(?:\/s(\d+))?/i
+  );
+  if (!m) return null;
+
+  const kind = m[1].toLowerCase(); // m | tv
+  let slug = m[2];
+  const season = m[3] ? String(parseInt(m[3], 10)) : "";
+
+  // Trailing _YYYY year in slug
+  let year = "";
+  const yearMatch = slug.match(/_(\d{4})$/);
+  if (yearMatch) {
+    year = yearMatch[1];
+    slug = slug.slice(0, -5);
+  }
+
+  // snake_case → Title Case words
+  const title = slug
+    .split("_")
+    .filter(Boolean)
+    .map(w => {
+      // keep short all-caps tokens like "ai" optional; simple title case
+      if (w.length <= 2) return w.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(" ");
+
+  return {
+    title,
+    year,
+    season,
+    mediaKind: kind === "tv" ? "series" : "movie"
+  };
+}
+
+function parseMediaLink(input) {
+  const value = String(input || "").trim();
+  if (!value) return { type: "empty" };
+
+  const imdbId = extractImdbId(value);
+  if (imdbId) return { type: "imdb", imdbId };
+
+  const rt = parseRottenTomatoesLink(value);
+  if (rt) return { type: "rt", ...rt };
+
+  // Bare title fallback (no URL)
+  if (!/^https?:\/\//i.test(value) && value.length >= 2) {
+    return { type: "title", title: value };
+  }
+
+  return { type: "unknown" };
+}
+
 function mapImdbRatingToStars(imdbRating) {
   const n = parseFloat(imdbRating);
   if (!Number.isFinite(n)) return "";
@@ -95,36 +155,7 @@ function mapImdbRatingToStars(imdbRating) {
   return String(Math.max(0, Math.min(5, mapped)));
 }
 
-async function fetchPosterBlob(posterUrl) {
-  if (!posterUrl || posterUrl === "N/A") return null;
-
-  try {
-    const res = await fetch(posterUrl, { mode: "cors" });
-    if (res.ok) {
-      const blob = await res.blob();
-      if (blob && blob.size > 0 && blob.type.startsWith("image/")) return blob;
-    }
-  } catch (_) { /* fall through */ }
-
-  try {
-    const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(posterUrl);
-    const res = await fetch(proxyUrl);
-    if (res.ok) {
-      const blob = await res.blob();
-      if (blob && blob.size > 0) {
-        if (!blob.type.startsWith("image/")) {
-          return new Blob([blob], { type: "image/jpeg" });
-        }
-        return blob;
-      }
-    }
-  } catch (err) {
-    console.warn("[IMDb] Poster download failed:", err);
-  }
-  return null;
-}
-
-async function fetchFromOmdb(imdbId) {
+async function fetchFromOmdbById(imdbId) {
   if (!OMDB_API_KEY) {
     throw new Error(
       "OMDb API key is missing. Get a free key at https://www.omdbapi.com/apikey.aspx and paste it into script.js (OMDB_API_KEY)."
@@ -138,55 +169,119 @@ async function fetchFromOmdb(imdbId) {
   return data;
 }
 
+async function fetchFromOmdbByTitle(title, year = "", preferType = "") {
+  if (!OMDB_API_KEY) {
+    throw new Error(
+      "OMDb API key is missing. Get a free key at https://www.omdbapi.com/apikey.aspx and paste it into script.js (OMDB_API_KEY)."
+    );
+  }
+
+  const params = new URLSearchParams({
+    t: title,
+    plot: "full",
+    apikey: OMDB_API_KEY
+  });
+  if (year) params.set("y", year);
+  if (preferType === "series") params.set("type", "series");
+  else if (preferType === "movie") params.set("type", "movie");
+
+  const res = await fetch(`https://www.omdbapi.com/?${params.toString()}`);
+  if (!res.ok) throw new Error(`OMDb request failed (${res.status}).`);
+  const data = await res.json();
+
+  if (data.Response === "False") {
+    // Retry without year / type if first attempt failed
+    const retryParams = new URLSearchParams({
+      t: title,
+      plot: "full",
+      apikey: OMDB_API_KEY
+    });
+    const retry = await fetch(`https://www.omdbapi.com/?${retryParams.toString()}`);
+    const retryData = await retry.json();
+    if (retryData.Response === "False") {
+      throw new Error(data.Error || `No match found for "${title}".`);
+    }
+    return retryData;
+  }
+  return data;
+}
+
+async function applyOmdbDataToForm(data, extras = {}) {
+  document.getElementById("mediaName").value = data.Title || "";
+  document.getElementById("mediaYear").value =
+    (data.Year || extras.year || "").replace(/[^0-9].*$/, "") || "";
+  document.getElementById("mediaGenre").value =
+    data.Genre && data.Genre !== "N/A" ? data.Genre.split(",")[0].trim() : "";
+  document.getElementById("mediaDescription").value =
+    data.Plot && data.Plot !== "N/A" ? data.Plot : "";
+
+  // Seasons: prefer OMDb totalSeasons, else RT season if provided
+  let seasons = "";
+  if (data.totalSeasons && data.totalSeasons !== "N/A") {
+    seasons = data.totalSeasons;
+  } else if (extras.season) {
+    seasons = extras.season;
+  }
+  document.getElementById("mediaParts").value = seasons;
+  document.getElementById("mediaRating").value = mapImdbRatingToStars(data.imdbRating);
+
+  setImdbStatus("Downloading poster…", "loading");
+  const posterBlob = await fetchPosterBlob(data.Poster);
+  if (posterBlob) {
+    try {
+      const resized = await resizeImageFromBlob(posterBlob);
+      showFetchedPoster(resized || posterBlob);
+    } catch {
+      showFetchedPoster(posterBlob);
+    }
+    setImdbStatus(`Filled: ${data.Title} (${data.Year || "n/a"}) · poster ready`, "success");
+  } else {
+    setImdbStatus(
+      `Filled: ${data.Title} (${data.Year || "n/a"}) · poster unavailable (upload manually)`,
+      "success"
+    );
+  }
+}
+
 async function handleImdbFetch() {
   const input = document.getElementById("imdbLink");
   const btn = document.getElementById("imdbFetchBtn");
   if (!input || !btn) return;
 
-  const imdbId = extractImdbId(input.value);
-  if (!imdbId) {
-    setImdbStatus("Paste a valid IMDb link or ID (e.g. tt0816692).", "error");
+  const parsed = parseMediaLink(input.value);
+  if (parsed.type === "empty") {
+    setImdbStatus("Paste an IMDb or Rotten Tomatoes link (or an IMDb ID).", "error");
+    input.focus();
+    return;
+  }
+  if (parsed.type === "unknown") {
+    setImdbStatus("Unrecognized link. Use IMDb, Rotten Tomatoes, or a title.", "error");
     input.focus();
     return;
   }
 
   btn.disabled = true;
-  setImdbStatus("Fetching from IMDb…", "loading");
   clearFetchedPoster();
 
   try {
-    const data = await fetchFromOmdb(imdbId);
+    let data;
 
-    document.getElementById("mediaName").value = data.Title || "";
-    document.getElementById("mediaYear").value = (data.Year || "").replace(/[^0-9].*$/, "") || "";
-    document.getElementById("mediaGenre").value =
-      data.Genre && data.Genre !== "N/A" ? data.Genre.split(",")[0].trim() : "";
-    document.getElementById("mediaDescription").value =
-      data.Plot && data.Plot !== "N/A" ? data.Plot : "";
-
-    const seasons = data.totalSeasons && data.totalSeasons !== "N/A" ? data.totalSeasons : "";
-    document.getElementById("mediaParts").value = seasons;
-    document.getElementById("mediaRating").value = mapImdbRatingToStars(data.imdbRating);
-
-    setImdbStatus("Downloading poster…", "loading");
-    const posterBlob = await fetchPosterBlob(data.Poster);
-    if (posterBlob) {
-      try {
-        const resized = await resizeImageFromBlob(posterBlob);
-        showFetchedPoster(resized || posterBlob);
-      } catch {
-        showFetchedPoster(posterBlob);
-      }
-      setImdbStatus(`Filled: ${data.Title} (${data.Year || "n/a"}) · poster ready`, "success");
-    } else {
-      setImdbStatus(
-        `Filled: ${data.Title} (${data.Year || "n/a"}) · poster unavailable (upload manually)`,
-        "success"
-      );
+    if (parsed.type === "imdb") {
+      setImdbStatus("Fetching from IMDb…", "loading");
+      data = await fetchFromOmdbById(parsed.imdbId);
+      await applyOmdbDataToForm(data);
+    } else if (parsed.type === "rt") {
+      setImdbStatus(`Looking up “${parsed.title}” from Rotten Tomatoes link…`, "loading");
+      data = await fetchFromOmdbByTitle(parsed.title, parsed.year, parsed.mediaKind);
+      await applyOmdbDataToForm(data, { year: parsed.year, season: parsed.season });
+    } else if (parsed.type === "title") {
+      setImdbStatus(`Searching “${parsed.title}”…`, "loading");
+      data = await fetchFromOmdbByTitle(parsed.title, "", "");
+      await applyOmdbDataToForm(data);
     }
   } catch (error) {
-    console.error("[IMDb] Fetch failed:", error);
-    setImdbStatus(error.message || "Could not fetch IMDb data.", "error");
+    console.error("[Media link] Fetch failed:", error);
+    setImdbStatus(error.message || "Could not fetch media data.", "error");
   } finally {
     btn.disabled = false;
   }
@@ -777,7 +872,8 @@ imdbLinkInput?.addEventListener("keydown", e => {
 
 imdbLinkInput?.addEventListener("paste", () => {
   window.setTimeout(() => {
-    if (extractImdbId(imdbLinkInput.value)) {
+    const p = parseMediaLink(imdbLinkInput.value);
+    if (p.type === "imdb" || p.type === "rt" || p.type === "title") {
       handleImdbFetch();
     }
   }, 50);
