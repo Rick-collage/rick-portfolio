@@ -1237,14 +1237,24 @@ main, header, footer {
   z-index: 1;
 }
 
-/* Energy pulse on logo image */
-.logo-img {
+/* Energy pulse on logo */
+.logo {
   animation: logoPulse 3s ease-in-out infinite;
 }
 
 @keyframes logoPulse {
-  0%, 100% { filter: drop-shadow(0 0 6px transparent); }
-  50% { filter: drop-shadow(0 0 12px rgba(192, 132, 252, 0.55)) drop-shadow(0 0 20px rgba(139, 92, 246, 0.25)); }
+  0%, 100% { text-shadow: 0 0 8px transparent; }
+  50% { text-shadow: 0 0 16px rgba(225, 29, 72, 0.45), 0 0 32px rgba(139, 92, 246, 0.2); }
+}
+
+.logo span {
+  animation: accentFlicker 2.5s ease-in-out infinite;
+}
+
+@keyframes accentFlicker {
+  0%, 100% { text-shadow: 0 0 20px rgba(139, 92, 246, 0.55); }
+  40% { text-shadow: 0 0 28px rgba(225, 29, 72, 0.8), 0 0 40px rgba(251, 191, 36, 0.3); }
+  60% { text-shadow: 0 0 14px rgba(225, 29, 72, 0.4); }
 }
 
 /* Hero name energy glow */
@@ -1851,9 +1861,31 @@ body::before{opacity:.08}
 .hero-main{position:relative;z-index:4;display:grid;grid-template-columns:1.1fr 1fr 150px;align-items:center;min-height:510px;padding:24px 44px 10px}
 .hero-copy{position:relative;z-index:8;align-self:end;padding-bottom:42px;color:#fff;animation:homeCopyIn .9s cubic-bezier(.2,.8,.2,1) both}
 .hero-kicker{font-size:.7rem;font-weight:900;letter-spacing:.2em;margin:0 0 20px;opacity:.8}
-.hero-copy h1{position:relative;margin:0;line-height:.72;font-size:clamp(6rem,15vw,13.5rem);font-weight:1000;letter-spacing:-.085em;text-transform:uppercase}
-.hero-ghost{position:absolute;left:-5px;top:0;color:transparent;-webkit-text-stroke:1px rgba(255,255,255,.14);transform:translate(14px,-10px);pointer-events:none}
-.hero-name{position:relative;display:block;color:#fff;text-shadow:0 12px 30px rgba(40,0,0,.22);animation:namePulse 4s ease-in-out infinite}
+.hero-copy h1{position:relative;margin:0;line-height:.78;font-size:clamp(6rem,15vw,13.5rem);font-weight:1000;letter-spacing:-.075em;text-transform:uppercase}
+.hero-ghost{
+  position:absolute;left:0;top:0;color:transparent;
+  -webkit-text-stroke:2px rgba(255,255,255,.10);
+  transform:translate(8px,-6px);
+  pointer-events:none;opacity:.35;
+}
+.hero-name{
+  position:relative;display:block;
+  color:#fff;
+  background:linear-gradient(100deg,#ffffff 0%,#e9d5ff 32%,#a855f7 64%,#38bdf8 100%);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;
+  filter:drop-shadow(0 10px 24px rgba(30,0,70,.32));
+  animation:rickNameReveal 1.15s cubic-bezier(.16,1,.3,1) both, rickNameGlow 3.8s ease-in-out 1.15s infinite;
+  transform-origin:left center;
+}
+.hero-name::after{
+  content:"";
+  position:absolute;left:0;top:8%;width:100%;height:4px;
+  background:linear-gradient(90deg,transparent,#fff,transparent);
+  filter:blur(2px);opacity:0;
+  animation:rickNameScan 2.4s ease-in-out 1.05s infinite;
+  pointer-events:none;
+}
 .hero-description{width:min(380px,80%);margin:28px 0 26px;color:rgba(255,255,255,.78);font-size:.9rem;line-height:1.7}
 .hero-actions{display:flex;align-items:center;gap:14px}.hero-actions strong{display:block;font-size:.72rem;letter-spacing:.12em}.hero-actions small{display:block;margin-top:5px;color:rgba(255,255,255,.52);font-size:.68rem}
 .hero-circle-btn{display:grid;place-items:center;width:54px;height:54px;border:1px solid rgba(255,255,255,.45);border-radius:50%;color:#fff;font-size:1.3rem;transition:.35s;box-shadow:0 0 0 rgba(255,255,255,0)}
@@ -1873,7 +1905,20 @@ body::before{opacity:.08}
 @keyframes homeCopyIn{from{opacity:0;transform:translateX(-45px)}to{opacity:1;transform:none}}
 @keyframes characterReveal{from{opacity:0;transform:translateY(70px) scale(.82) skewX(-7deg)}to{opacity:1;transform:translateY(0) scale(1) skewX(-7deg)}}
 @keyframes characterFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-@keyframes namePulse{0%,100%{letter-spacing:-.085em}50%{letter-spacing:-.065em}}
+@keyframes rickNameReveal{
+  0%{opacity:0;transform:translateX(-38px) scaleX(.72);filter:blur(12px) drop-shadow(0 0 0 transparent)}
+  55%{opacity:1;transform:translateX(7px) scaleX(1.04);filter:blur(0) drop-shadow(0 10px 28px rgba(110,40,190,.55))}
+  100%{opacity:1;transform:translateX(0) scaleX(1);filter:drop-shadow(0 10px 24px rgba(30,0,70,.32))}
+}
+@keyframes rickNameGlow{
+  0%,100%{filter:drop-shadow(0 10px 24px rgba(30,0,70,.32))}
+  50%{filter:drop-shadow(0 0 10px rgba(180,90,255,.42)) drop-shadow(0 10px 30px rgba(30,0,70,.32))}
+}
+@keyframes rickNameScan{
+  0%,65%,100%{opacity:0;transform:translateY(0)}
+  72%{opacity:.8;transform:translateY(34px)}
+  78%{opacity:0;transform:translateY(62px)}
+}
 @keyframes codeBlink{0%,100%{opacity:.35}50%{opacity:1}}
 @keyframes scrollLine{0%,100%{width:12%}50%{width:38%}}
 @keyframes starSpin{to{transform:rotate(360deg)}}
@@ -1886,7 +1931,3 @@ body::before{opacity:.08}
 @media (prefers-reduced-motion:reduce){.hero-panel:before,.hero-name,.hero-character,.character-rick,.character-code,.hero-panel-bottom i:after,.home-feature-dark:before{animation:none!important}}
 
 .hero-copy h1 .hero-name{color:#fff!important}
-
-
-/* Opening overlay only — does not modify the existing Home layout */
-.anime-intro { position: fixed !important; inset: 0 !important; z-index: 10000 !important; }
