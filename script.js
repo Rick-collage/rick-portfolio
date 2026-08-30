@@ -206,12 +206,96 @@ async function fetchFromOmdbByTitle(title, year = "", preferType = "") {
   return data;
 }
 
+
+async function fetchPosterBlob(posterUrl) {
+  if (!posterUrl || posterUrl === "N/A") return null;
+
+  const tryFetch = async (url, mode) => {
+    const res = await fetch(url, mode ? { mode } : undefined);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size < 100) return null;
+    if (blob.type.startsWith("image/") || !blob.type || blob.type === "application/octet-stream") {
+      return blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    }
+    return null;
+  };
+
+  // 1) Direct (Amazon CDN often allows CORS *)
+  try {
+    const blob = await tryFetch(posterUrl, "cors");
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] Direct fetch failed:", err);
+  }
+
+  // 2) corsproxy.io
+  try {
+    const blob = await tryFetch("https://corsproxy.io/?" + encodeURIComponent(posterUrl));
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] corsproxy failed:", err);
+  }
+
+  // 3) allorigins
+  try {
+    const blob = await tryFetch(
+      "https://api.allorigins.win/raw?url=" + encodeURIComponent(posterUrl)
+    );
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] allorigins failed:", err);
+  }
+
+  // 4) <img> + canvas fallback
+  try {
+    const blob = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      const timer = setTimeout(() => {
+        reject(new Error("Poster image load timeout"));
+      }, 12000);
+      img.onload = () => {
+        clearTimeout(timer);
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("No canvas context"));
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob(
+            b => (b ? resolve(b) : reject(new Error("toBlob failed"))),
+            "image/jpeg",
+            0.85
+          );
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("Image element failed to load poster"));
+      };
+      img.src = posterUrl;
+    });
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] canvas fallback failed:", err);
+  }
+
+  return null;
+}
+
 async function applyOmdbDataToForm(data, extras = {}) {
   document.getElementById("mediaName").value = data.Title || "";
   document.getElementById("mediaYear").value =
     (data.Year || extras.year || "").replace(/[^0-9].*$/, "") || "";
   document.getElementById("mediaGenre").value =
-    data.Genre && data.Genre !== "N/A" ? data.Genre.split(",")[0].trim() : "";
+    data.Genre && data.Genre !== "N/A" ? normalizeGenres(data.Genre) : "";
   document.getElementById("mediaDescription").value =
     data.Plot && data.Plot !== "N/A" ? data.Plot : "";
 
@@ -355,6 +439,24 @@ function stars(rating) {
   // show numeric value too, e.g. 4.3
   const shown = Number.isInteger(clamped) ? String(clamped) : clamped.toFixed(1);
   return `${out} ${shown}`;
+}
+
+
+function normalizeGenres(value) {
+  return String(value || "")
+    .split(",")
+    .map(g => g.trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function genreTagsHtml(genre) {
+  const parts = String(genre || "")
+    .split(",")
+    .map(g => g.trim())
+    .filter(Boolean);
+  if (!parts.length) return "";
+  return `<div class="genre-tags">${parts.map(g => `<span class="genre-tag">${escapeHtml(g)}</span>`).join("")}</div>`;
 }
 
 function escapeHtml(value) {
@@ -724,22 +826,20 @@ async function renderMedia() {
     const info = document.createElement("div");
     info.className = "media-info";
 
-    const meta = `${item.year || ""}${
-      item.year && item.genre ? " • " : ""
-    }${escapeHtml(item.genre || "")}${
-      item.parts
-        ? (item.year || item.genre ? " • " : "") +
-          escapeHtml(item.parts) +
-          " " +
-          (item.type === "movie"
+    const yearBit = item.year || "";
+    const partsBit = item.parts
+      ? `${escapeHtml(item.parts)} ${
+          item.type === "movie"
             ? (Number(item.parts) === 1 ? "Part" : "Parts")
-            : (Number(item.parts) === 1 ? "Season" : "Seasons"))
-        : ""
-    }`;
+            : (Number(item.parts) === 1 ? "Season" : "Seasons")
+        }`
+      : "";
+    const meta = [yearBit, partsBit].filter(Boolean).join(" • ");
 
     info.innerHTML = `
       <h3>${escapeHtml(item.name)}</h3>
       <p class="media-meta">${meta}</p>
+      ${genreTagsHtml(item.genre)}
       ${item.rating ? `<div class="rating">${stars(item.rating)}</div>` : ""}
       ${item.description ? `<p class="media-description">${escapeHtml(item.description)}</p>` : ""}
     `;
@@ -905,7 +1005,7 @@ mediaForm.addEventListener("submit", async event => {
     const type = document.getElementById("mediaType").value;
     const name = document.getElementById("mediaName").value.trim();
     const year = document.getElementById("mediaYear").value;
-    const genre = document.getElementById("mediaGenre").value.trim();
+    const genre = normalizeGenres(document.getElementById("mediaGenre").value);
     const parts = document.getElementById("mediaParts").value;
     const ratingRaw = document.getElementById("mediaRating").value;
     let rating = "";

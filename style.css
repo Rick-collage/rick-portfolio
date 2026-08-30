@@ -2015,3 +2015,23 @@ body::before{opacity:.08}
 @media (prefers-reduced-motion:reduce){.hero-panel:before,.hero-name,.hero-character,.character-rick,.character-code,.hero-panel-bottom i:after,.home-feature-dark:before{animation:none!important}}
 
 .hero-copy h1 .hero-name{color:#fff!important}
+
+
+/* Multiple genre tags on media cards */
+.genre-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.genre-tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-bright, #c084fc);
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  border-radius: 999px;
+  padding: 3px 9px;
+}
