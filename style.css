@@ -1009,6 +1009,90 @@ footer {
   margin-top: 5px;
 }
 
+.imdb-fetch-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.imdb-fetch-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.imdb-fetch-btn {
+  flex-shrink: 0;
+  padding: 0 16px;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
+.imdb-fetch-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+  filter: none;
+}
+
+.imdb-fetch-status {
+  min-height: 1.2em;
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.imdb-fetch-status.is-loading {
+  color: var(--accent2);
+}
+
+.imdb-fetch-status.is-success {
+  color: #4ade80;
+}
+
+.imdb-fetch-status.is-error {
+  color: #f87171;
+}
+
+.poster-preview {
+  position: relative;
+  margin-top: 12px;
+  width: 110px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.poster-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+}
+
+.poster-preview-clear {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.2s ease;
+}
+
+.poster-preview-clear:hover {
+  background: rgba(225, 29, 72, 0.85);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

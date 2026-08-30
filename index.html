@@ -205,6 +205,13 @@
             <input type="hidden" id="mediaId">
             <input type="hidden" id="mediaType">
 
+            <label for="imdbLink">IMDb link (auto-fill)</label>
+            <div class="imdb-fetch-row">
+              <input id="imdbLink" type="url" placeholder="https://www.imdb.com/title/tt0816692/ or tt0816692" autocomplete="off">
+              <button type="button" class="btn primary imdb-fetch-btn" id="imdbFetchBtn">Fetch</button>
+            </div>
+            <div id="imdbFetchStatus" class="imdb-fetch-status" aria-live="polite"></div>
+
             <label for="mediaName">Name</label>
             <input id="mediaName" type="text" placeholder="e.g. Interstellar" required>
 
@@ -229,7 +236,11 @@
 
             <label for="mediaImage">Poster</label>
             <input id="mediaImage" type="file" accept="image/*">
-            <div class="image-help">Poster is stored locally in this browser using IndexedDB.</div>
+            <div class="image-help">Poster is stored locally in this browser using IndexedDB. Auto-fetched from IMDb when available.</div>
+            <div id="posterPreview" class="poster-preview" hidden>
+              <img id="posterPreviewImg" alt="Poster preview">
+              <button type="button" class="poster-preview-clear" id="clearPosterPreview" title="Remove auto poster">×</button>
+            </div>
 
             <label for="mediaDescription">Description</label>
             <textarea id="mediaDescription" rows="3" placeholder="Short description..."></textarea>

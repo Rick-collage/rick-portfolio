@@ -36,8 +36,201 @@ const DB_VERSION = 1;
 const ITEMS_STORE = "mediaItems";
 const IMAGES_STORE = "mediaImages";
 
+/* Free OMDb API key — https://www.omdbapi.com/apikey.aspx (1,000 req/day) */
+const OMDB_API_KEY = "3161b39f";
+
+// Temporary poster blob from IMDb auto-fetch (used on Save if no file chosen)
+let fetchedPosterBlob = null;
+let fetchedPosterObjectUrl = null;
+
 function getTypeLabel(type) {
   return type === "movie" ? "Movie" : type === "anime" ? "Anime" : "Web Series";
+}
+
+function setImdbStatus(message, state = "") {
+  const el = document.getElementById("imdbFetchStatus");
+  if (!el) return;
+  el.textContent = message || "";
+  el.className = "imdb-fetch-status" + (state ? ` is-${state}` : "");
+}
+
+function clearFetchedPoster() {
+  fetchedPosterBlob = null;
+  if (fetchedPosterObjectUrl) {
+    URL.revokeObjectURL(fetchedPosterObjectUrl);
+    fetchedPosterObjectUrl = null;
+  }
+  const preview = document.getElementById("posterPreview");
+  const img = document.getElementById("posterPreviewImg");
+  if (preview) preview.hidden = true;
+  if (img) img.removeAttribute("src");
+}
+
+function showFetchedPoster(blob) {
+  clearFetchedPoster();
+  if (!blob) return;
+  fetchedPosterBlob = blob;
+  fetchedPosterObjectUrl = URL.createObjectURL(blob);
+  const preview = document.getElementById("posterPreview");
+  const img = document.getElementById("posterPreviewImg");
+  if (img) img.src = fetchedPosterObjectUrl;
+  if (preview) preview.hidden = false;
+}
+
+function extractImdbId(input) {
+  const value = String(input || "").trim();
+  if (!value) return null;
+  const urlMatch = value.match(/imdb\.com\/title\/(tt\d{5,})/i);
+  if (urlMatch) return urlMatch[1].toLowerCase();
+  const idMatch = value.match(/^(tt\d{5,})$/i);
+  if (idMatch) return idMatch[1].toLowerCase();
+  return null;
+}
+
+function mapImdbRatingToStars(imdbRating) {
+  const n = parseFloat(imdbRating);
+  if (!Number.isFinite(n)) return "";
+  if (n >= 8.2) return "5";
+  if (n >= 7.0) return "4";
+  if (n >= 5.5) return "3";
+  if (n >= 4.0) return "2";
+  return "1";
+}
+
+async function fetchPosterBlob(posterUrl) {
+  if (!posterUrl || posterUrl === "N/A") return null;
+
+  try {
+    const res = await fetch(posterUrl, { mode: "cors" });
+    if (res.ok) {
+      const blob = await res.blob();
+      if (blob && blob.size > 0 && blob.type.startsWith("image/")) return blob;
+    }
+  } catch (_) { /* fall through */ }
+
+  try {
+    const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(posterUrl);
+    const res = await fetch(proxyUrl);
+    if (res.ok) {
+      const blob = await res.blob();
+      if (blob && blob.size > 0) {
+        if (!blob.type.startsWith("image/")) {
+          return new Blob([blob], { type: "image/jpeg" });
+        }
+        return blob;
+      }
+    }
+  } catch (err) {
+    console.warn("[IMDb] Poster download failed:", err);
+  }
+  return null;
+}
+
+async function fetchFromOmdb(imdbId) {
+  if (!OMDB_API_KEY) {
+    throw new Error(
+      "OMDb API key is missing. Get a free key at https://www.omdbapi.com/apikey.aspx and paste it into script.js (OMDB_API_KEY)."
+    );
+  }
+  const url = `https://www.omdbapi.com/?i=${encodeURIComponent(imdbId)}&plot=full&apikey=${encodeURIComponent(OMDB_API_KEY)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`OMDb request failed (${res.status}).`);
+  const data = await res.json();
+  if (data.Response === "False") throw new Error(data.Error || "Title not found on OMDb.");
+  return data;
+}
+
+async function handleImdbFetch() {
+  const input = document.getElementById("imdbLink");
+  const btn = document.getElementById("imdbFetchBtn");
+  if (!input || !btn) return;
+
+  const imdbId = extractImdbId(input.value);
+  if (!imdbId) {
+    setImdbStatus("Paste a valid IMDb link or ID (e.g. tt0816692).", "error");
+    input.focus();
+    return;
+  }
+
+  btn.disabled = true;
+  setImdbStatus("Fetching from IMDb…", "loading");
+  clearFetchedPoster();
+
+  try {
+    const data = await fetchFromOmdb(imdbId);
+
+    document.getElementById("mediaName").value = data.Title || "";
+    document.getElementById("mediaYear").value = (data.Year || "").replace(/[^0-9].*$/, "") || "";
+    document.getElementById("mediaGenre").value =
+      data.Genre && data.Genre !== "N/A" ? data.Genre.split(",")[0].trim() : "";
+    document.getElementById("mediaDescription").value =
+      data.Plot && data.Plot !== "N/A" ? data.Plot : "";
+
+    const seasons = data.totalSeasons && data.totalSeasons !== "N/A" ? data.totalSeasons : "";
+    document.getElementById("mediaParts").value = seasons;
+    document.getElementById("mediaRating").value = mapImdbRatingToStars(data.imdbRating);
+
+    setImdbStatus("Downloading poster…", "loading");
+    const posterBlob = await fetchPosterBlob(data.Poster);
+    if (posterBlob) {
+      try {
+        const resized = await resizeImageFromBlob(posterBlob);
+        showFetchedPoster(resized || posterBlob);
+      } catch {
+        showFetchedPoster(posterBlob);
+      }
+      setImdbStatus(`Filled: ${data.Title} (${data.Year || "n/a"}) · poster ready`, "success");
+    } else {
+      setImdbStatus(
+        `Filled: ${data.Title} (${data.Year || "n/a"}) · poster unavailable (upload manually)`,
+        "success"
+      );
+    }
+  } catch (error) {
+    console.error("[IMDb] Fetch failed:", error);
+    setImdbStatus(error.message || "Could not fetch IMDb data.", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function resizeImageFromBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const max = 900;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          resolve(blob);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          result => {
+            URL.revokeObjectURL(url);
+            resolve(result || blob);
+          },
+          "image/jpeg",
+          0.78
+        );
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not decode poster image."));
+    };
+    img.src = url;
+  });
 }
 
 function showMediaError(message, error = null) {
@@ -455,6 +648,8 @@ function openModal(id = null) {
   if (!verifyPassword()) return;
 
   mediaForm.reset();
+  clearFetchedPoster();
+  setImdbStatus("");
   document.getElementById("mediaId").value = "";
   document.getElementById("mediaType").value = currentType;
   const typeLabel = getTypeLabel(currentType);
@@ -483,6 +678,8 @@ function openModal(id = null) {
 function closeModal() {
   mediaModal.classList.remove("show");
   mediaModal.setAttribute("aria-hidden", "true");
+  clearFetchedPoster();
+  setImdbStatus("");
 }
 
 async function deleteMedia(id) {
@@ -545,6 +742,41 @@ mediaModal.addEventListener("click", event => {
   if (event.target === mediaModal) closeModal();
 });
 
+// IMDb auto-fill
+const imdbFetchBtn = document.getElementById("imdbFetchBtn");
+const imdbLinkInput = document.getElementById("imdbLink");
+const clearPosterPreviewBtn = document.getElementById("clearPosterPreview");
+
+imdbFetchBtn?.addEventListener("click", handleImdbFetch);
+
+imdbLinkInput?.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    handleImdbFetch();
+  }
+});
+
+imdbLinkInput?.addEventListener("paste", () => {
+  window.setTimeout(() => {
+    if (extractImdbId(imdbLinkInput.value)) {
+      handleImdbFetch();
+    }
+  }, 50);
+});
+
+clearPosterPreviewBtn?.addEventListener("click", () => {
+  clearFetchedPoster();
+  setImdbStatus("Auto poster removed. You can upload one manually.", "");
+});
+
+document.getElementById("mediaImage")?.addEventListener("change", () => {
+  const fileInput = document.getElementById("mediaImage");
+  if (fileInput?.files?.length) {
+    clearFetchedPoster();
+    setImdbStatus("Using uploaded poster instead of IMDb auto poster.", "");
+  }
+});
+
 mediaForm.addEventListener("submit", async event => {
   event.preventDefault();
 
@@ -590,6 +822,9 @@ mediaForm.addEventListener("submit", async event => {
     if (imageFile) {
       const imageBlob = await resizeImage(imageFile);
       await dbPutImage(itemId, imageBlob);
+      imageKey = itemId;
+    } else if (fetchedPosterBlob) {
+      await dbPutImage(itemId, fetchedPosterBlob);
       imageKey = itemId;
     }
 
