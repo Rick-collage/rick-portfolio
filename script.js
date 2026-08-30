@@ -31,10 +31,15 @@ let mediaItems = [];
 let collectionReady = false;
 let imageObjectUrls = new Set();
 
-const DB_NAME = "rickPortfolioDB";
-const DB_VERSION = 1;
-const ITEMS_STORE = "mediaItems";
-const IMAGES_STORE = "mediaImages";
+/* =========================
+   ONLINE COLLECTION — SUPABASE
+   ========================= */
+const SUPABASE_URL = window.SUPABASE_CONFIG?.url || "";
+const SUPABASE_KEY = window.SUPABASE_CONFIG?.publishableKey || "";
+const MEDIA_TABLE = "media_items";
+const POSTER_BUCKET = "media-posters";
+
+let supabaseClient = null;
 
 function getTypeLabel(type) {
   return type === "movie" ? "Movie" : type === "anime" ? "Anime" : "Web Series";
@@ -58,156 +63,123 @@ function escapeHtml(value) {
 
 function verifyPassword() {
   const password = prompt("Enter password to continue:");
-  if (password === "186290") {
-    return true;
-  } else if (password !== null) {
-    alert("Incorrect password!");
-  }
+  if (password === "186290") return true;
+  if (password !== null) alert("Incorrect password!");
   return false;
 }
 
-function openDatabase() {
-  return new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
-      reject(new Error("IndexedDB is not supported by this browser."));
-      return;
-    }
-
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = event => {
-      const db = event.target.result;
-
-      if (!db.objectStoreNames.contains(ITEMS_STORE)) {
-        db.createObjectStore(ITEMS_STORE, { keyPath: "id" });
-      }
-
-      if (!db.objectStoreNames.contains(IMAGES_STORE)) {
-        db.createObjectStore(IMAGES_STORE);
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("Could not open browser database."));
-  });
+function ensureSupabase() {
+  if (!SUPABASE_URL || !SUPABASE_KEY || SUPABASE_URL.includes("YOUR_") || SUPABASE_KEY.includes("YOUR_")) {
+    throw new Error("Supabase is not configured yet. Edit supabase-config.js and add your project URL and publishable/anon key.");
+  }
+  if (!window.supabase?.createClient) {
+    throw new Error("Supabase library could not be loaded. Check your internet connection and refresh the page.");
+  }
+  if (!supabaseClient) {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+  }
+  return supabaseClient;
 }
 
-let dbPromise = openDatabase();
+function publicPosterUrl(path) {
+  if (!path) return "";
+  const { data } = ensureSupabase().storage.from(POSTER_BUCKET).getPublicUrl(path);
+  return data?.publicUrl || "";
+}
+
+function rowToItem(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    name: row.name || "",
+    year: row.year || "",
+    genre: row.genre || "",
+    parts: row.parts || "",
+    rating: row.rating || "",
+    description: row.description || "",
+    imageKey: row.image_path || "",
+    addedAt: row.added_at ? new Date(row.added_at).getTime() : 0
+  };
+}
+
+function itemToRow(item) {
+  return {
+    id: item.id,
+    type: item.type,
+    name: item.name,
+    year: item.year || null,
+    genre: item.genre || null,
+    parts: item.parts || null,
+    rating: item.rating || null,
+    description: item.description || null,
+    image_path: item.imageKey || null,
+    added_at: new Date(item.addedAt || Date.now()).toISOString()
+  };
+}
 
 async function dbGetAllItems() {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(ITEMS_STORE, "readonly");
-    const request = tx.objectStore(ITEMS_STORE).getAll();
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
+  const client = ensureSupabase();
+  const { data, error } = await client
+    .from(MEDIA_TABLE)
+    .select("id,type,name,year,genre,parts,rating,description,image_path,added_at")
+    .order("added_at", { ascending: false });
+  if (error) throw error;
+  return (data || []).map(rowToItem);
 }
 
 async function dbPutItem(item) {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(ITEMS_STORE, "readwrite");
-    tx.objectStore(ITEMS_STORE).put(item);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
-  });
+  const client = ensureSupabase();
+  const { error } = await client.from(MEDIA_TABLE).upsert(itemToRow(item), { onConflict: "id" });
+  if (error) throw error;
 }
 
-async function dbDeleteItem(id) {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction([ITEMS_STORE, IMAGES_STORE], "readwrite");
-    tx.objectStore(ITEMS_STORE).delete(id);
-    tx.objectStore(IMAGES_STORE).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
-  });
-}
+async function dbDeleteItem(id, imagePath = "") {
+  const client = ensureSupabase();
+  const { error } = await client.from(MEDIA_TABLE).delete().eq("id", id);
+  if (error) throw error;
 
-async function dbPutImage(id, blob) {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IMAGES_STORE, "readwrite");
-    tx.objectStore(IMAGES_STORE).put(blob, id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
-  });
-}
-
-async function dbGetImage(id) {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IMAGES_STORE, "readonly");
-    const request = tx.objectStore(IMAGES_STORE).get(id);
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function dataUrlToBlob(dataUrl) {
-  const parts = dataUrl.split(",");
-  const match = parts[0].match(/data:([^;]+);base64/);
-  if (!match || !parts[1]) {
-    throw new Error("Legacy poster data could not be converted.");
+  if (imagePath) {
+    const { error: storageError } = await client.storage.from(POSTER_BUCKET).remove([imagePath]);
+    if (storageError) console.warn("[Collection] Poster cleanup failed:", storageError);
   }
-
-  const mime = match[1];
-  const binary = atob(parts[1]);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return new Blob([bytes], { type: mime });
 }
 
-/*
- * One-time migration:
- * Older versions stored poster Base64 strings in localStorage under
- * "rickMediaCollection". We move those posters into IndexedDB and keep
- * only lightweight metadata in the database.
- */
+async function dbPutImage(path, blob) {
+  const client = ensureSupabase();
+  const { error } = await client.storage.from(POSTER_BUCKET).upload(path, blob, {
+    upsert: true,
+    contentType: blob.type || "image/jpeg",
+    cacheControl: "3600"
+  });
+  if (error) throw error;
+}
+
+async function dbRemoveImage(path) {
+  if (!path) return;
+  const client = ensureSupabase();
+  const { error } = await client.storage.from(POSTER_BUCKET).remove([path]);
+  if (error) console.warn("[Collection] Old poster could not be removed:", error);
+}
+
 async function migrateLegacyCollection() {
+  // Older builds stored lightweight metadata in localStorage. Importing that data
+  // is safe, but Base64 posters are intentionally skipped here because the new
+  // system stores posters in Supabase Storage.
   let raw = null;
-
-  try {
-    raw = localStorage.getItem("rickMediaCollection");
-  } catch (error) {
-    console.warn("[Collection] Could not read legacy localStorage data:", error);
-    return;
-  }
-
+  try { raw = localStorage.getItem("rickMediaCollection"); } catch (_) { return; }
   if (!raw) return;
 
   let legacyItems;
   try {
     legacyItems = JSON.parse(raw);
-    if (!Array.isArray(legacyItems)) {
-      throw new Error("Legacy collection is not a valid list.");
-    }
-  } catch (error) {
-    console.error("[Collection] Legacy collection could not be parsed:", error);
-    return;
-  }
-
-  if (!legacyItems.length) {
-    try { localStorage.removeItem("rickMediaCollection"); } catch (_) {}
-    return;
-  }
+    if (!Array.isArray(legacyItems)) return;
+  } catch (_) { return; }
 
   try {
     for (const legacy of legacyItems) {
-      const id = legacy.id || (
-        crypto.randomUUID
-          ? crypto.randomUUID()
-          : `media-${Date.now()}-${Math.random().toString(16).slice(2)}`
-      );
-
+      const id = legacy.id || (crypto.randomUUID ? crypto.randomUUID() : `media-${Date.now()}-${Math.random().toString(16).slice(2)}`);
       const item = {
         id,
         type: legacy.type,
@@ -220,28 +192,12 @@ async function migrateLegacyCollection() {
         imageKey: "",
         addedAt: Number(legacy.addedAt) || Date.now()
       };
-
-      if (legacy.image && typeof legacy.image === "string") {
-        try {
-          const blob = dataUrlToBlob(legacy.image);
-          await dbPutImage(id, blob);
-          item.imageKey = id;
-        } catch (imageError) {
-          console.warn(`[Collection] Could not migrate poster for "${item.name}":`, imageError);
-        }
-      }
-
       await dbPutItem(item);
     }
-
-    // Remove the old Base64 collection only after migration succeeds.
     localStorage.removeItem("rickMediaCollection");
-    console.info("[Collection] Legacy collection migrated to IndexedDB.");
+    console.info("[Collection] Legacy metadata imported into Supabase.");
   } catch (error) {
-    console.error("[Collection] Legacy migration failed:", error);
-    throw new Error(
-      "Your old collection could not be migrated completely. Your existing browser data was left untouched."
-    );
+    console.warn("[Collection] Legacy import failed:", error);
   }
 }
 
@@ -347,23 +303,14 @@ async function renderMedia() {
     if (item.imageKey) {
       const img = document.createElement("img");
       img.alt = `${item.name} poster`;
-
-      try {
-        const blob = await dbGetImage(item.imageKey);
-        if (blob) {
-          const url = URL.createObjectURL(blob);
-          imageObjectUrls.add(url);
-          img.src = url;
-          posterWrap.appendChild(img);
-        } else {
-          throw new Error("Poster file was not found.");
-        }
-      } catch (error) {
-        console.warn(`[Collection] Poster could not be loaded for "${item.name}":`, error);
+      img.src = publicPosterUrl(item.imageKey);
+      img.loading = "lazy";
+      img.onerror = () => {
         posterWrap.innerHTML = `<div class="poster-placeholder">${
           item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"
         }</div>`;
-      }
+      };
+      posterWrap.appendChild(img);
     } else {
       posterWrap.innerHTML = `<div class="poster-placeholder">${
         item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"
@@ -457,7 +404,7 @@ async function deleteMedia(id) {
 
   if (confirm(`Delete "${item.name}"?`)) {
     try {
-      await dbDeleteItem(id);
+      await dbDeleteItem(id, item.imageKey);
       mediaItems = mediaItems.filter(x => x.id !== id);
       await renderMedia();
     } catch (error) {
@@ -553,8 +500,12 @@ mediaForm.addEventListener("submit", async event => {
 
     if (imageFile) {
       const imageBlob = await resizeImage(imageFile);
-      await dbPutImage(itemId, imageBlob);
-      imageKey = itemId;
+      const newImagePath = `${itemId}.jpg`;
+      await dbPutImage(newImagePath, imageBlob);
+      if (existing?.imageKey && existing.imageKey !== newImagePath) {
+        await dbRemoveImage(existing.imageKey);
+      }
+      imageKey = newImagePath;
     }
 
     const item = {
@@ -608,8 +559,8 @@ function resizeImage(file) {
 
       img.onload = () => {
         try {
-          // Keep posters reasonably sized while storing the actual binary
-          // image in IndexedDB instead of Base64 in localStorage.
+          // Keep posters reasonably sized before uploading the binary image
+          // to Supabase Storage.
           const max = 900;
           const scale = Math.min(1, max / Math.max(img.width, img.height));
           const canvas = document.createElement("canvas");
