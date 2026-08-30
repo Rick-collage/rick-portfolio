@@ -90,11 +90,9 @@ function extractImdbId(input) {
 function mapImdbRatingToStars(imdbRating) {
   const n = parseFloat(imdbRating);
   if (!Number.isFinite(n)) return "";
-  if (n >= 8.2) return "5";
-  if (n >= 7.0) return "4";
-  if (n >= 5.5) return "3";
-  if (n >= 4.0) return "2";
-  return "1";
+  // Map IMDb 0–10 → 0–5 with one decimal (e.g. 8.6 → 4.3)
+  const mapped = Math.round((n / 2) * 10) / 10;
+  return String(Math.max(0, Math.min(5, mapped)));
 }
 
 async function fetchPosterBlob(posterUrl) {
@@ -239,8 +237,29 @@ function showMediaError(message, error = null) {
 }
 
 function stars(rating) {
-  if (!rating) return "";
-  return "★".repeat(Number(rating)) + "☆".repeat(5 - Number(rating));
+  const n = parseFloat(rating);
+  if (!Number.isFinite(n) || n <= 0) return "";
+
+  const clamped = Math.max(0, Math.min(5, n));
+  const full = Math.floor(clamped);
+  const frac = clamped - full;
+  let out = "★".repeat(full);
+
+  // half star for .3 – .7 range, full for higher fraction
+  if (frac >= 0.75 && full < 5) {
+    out += "★";
+  } else if (frac >= 0.25 && full < 5) {
+    out += "½";
+  }
+
+  const empty = 5 - out.replace(/½/g, "★").length;
+  // count visual slots: full stars + optional half = slots used
+  const slots = full + (frac >= 0.25 && full < 5 ? 1 : 0);
+  out += "☆".repeat(Math.max(0, 5 - slots));
+
+  // show numeric value too, e.g. 4.3
+  const shown = Number.isInteger(clamped) ? String(clamped) : clamped.toFixed(1);
+  return `${out} ${shown}`;
 }
 
 function escapeHtml(value) {
@@ -792,7 +811,14 @@ mediaForm.addEventListener("submit", async event => {
     const year = document.getElementById("mediaYear").value;
     const genre = document.getElementById("mediaGenre").value.trim();
     const parts = document.getElementById("mediaParts").value;
-    const rating = document.getElementById("mediaRating").value;
+    const ratingRaw = document.getElementById("mediaRating").value;
+    let rating = "";
+    if (ratingRaw !== "" && ratingRaw !== null) {
+      const rn = parseFloat(ratingRaw);
+      if (Number.isFinite(rn)) {
+        rating = String(Math.max(0, Math.min(5, Math.round(rn * 10) / 10)));
+      }
+    }
     const description = document.getElementById("mediaDescription").value.trim();
     const imageFile = document.getElementById("mediaImage").files[0];
 
