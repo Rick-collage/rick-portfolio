@@ -7,6 +7,8 @@
   <title>Rick | B.Tech Student Portfolio</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
 </head>
 <body>
   <header class="navbar">
@@ -59,7 +61,7 @@
         </div>
 
         <div class="hero-panel-bottom">
-          <span>SCROLL TO DISCOVER</span><i></i><span>INDIA · 2026</span>
+          <span>SCROLL TO DISCOVER</span><i></i><span>INDIA · <span id="heroYear">2026</span></span>
         </div>
       </div>
 
@@ -231,7 +233,7 @@
 
             <label for="mediaImage">Poster</label>
             <input id="mediaImage" type="file" accept="image/*">
-            <div class="image-help">Poster is stored locally in this browser using IndexedDB. Auto-fetched from IMDb when available.</div>
+            <div class="image-help">Poster is stored in the shared Supabase media-posters bucket. Auto-fill uses the optional secure Supabase Edge Function.</div>
             <div id="posterPreview" class="poster-preview" hidden>
               <img id="posterPreviewImg" alt="Poster preview">
               <button type="button" class="poster-preview-clear" id="clearPosterPreview" title="Remove auto poster">×</button>
@@ -257,8 +259,7 @@
       <div class="contact-box">
         <p>Interested in technology, projects, gaming, or just saying hello? Reach out.</p>
         <div class="contact-buttons">
-          <a class="btn primary" href="mailto:your-email@example.com">Email</a>
-          <a class="btn secondary" href="https://steamcommunity.com/id/I_like_banana/" target="_blank" rel="noopener noreferrer">Steam</a>
+           <a class="btn secondary" href="https://steamcommunity.com/id/I_like_banana/" target="_blank" rel="noopener noreferrer">Steam</a>
         </div>
       </div>
     </section>
