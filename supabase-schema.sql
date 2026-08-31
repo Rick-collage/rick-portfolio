@@ -1,7 +1,5 @@
--- Rick Portfolio shared media collection — secure version
--- Run this whole file in Supabase Dashboard -> SQL Editor.
--- BEFORE running: replace YOUR_ADMIN_EMAIL@example.com with the exact email
--- of the single Supabase Auth account that should manage the collection.
+-- Run this entire file in Supabase Dashboard -> SQL Editor.
+-- This creates the shared collection table, RLS policies, and poster storage policies.
 
 create table if not exists public.media_items (
   id text primary key,
@@ -18,65 +16,56 @@ create table if not exists public.media_items (
 
 alter table public.media_items enable row level security;
 
-grant select on public.media_items to anon, authenticated;
-grant insert, update, delete on public.media_items to authenticated;
-
-drop policy if exists "Public can read media collection" on public.media_items;
-drop policy if exists "Public can insert media collection" on public.media_items;
-drop policy if exists "Public can update media collection" on public.media_items;
-drop policy if exists "Public can delete media collection" on public.media_items;
-drop policy if exists "Admin can insert media collection" on public.media_items;
-drop policy if exists "Admin can update media collection" on public.media_items;
-drop policy if exists "Admin can delete media collection" on public.media_items;
-
+-- Public visitors can read the collection.
 create policy "Public can read media collection"
-on public.media_items for select
-to anon, authenticated using (true);
+on public.media_items
+for select to anon, authenticated
+using (true);
 
-create policy "Admin can insert media collection"
-on public.media_items for insert
-to authenticated
-with check ((auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+-- The current site uses its existing client-side password as a UI gate.
+-- IMPORTANT: this is NOT a secure authorization boundary. Anyone who can inspect
+-- browser code can call the public API. For a private admin panel, add Supabase Auth.
+create policy "Public can insert media collection"
+on public.media_items
+for insert to anon, authenticated
+with check (true);
 
-create policy "Admin can update media collection"
-on public.media_items for update
-to authenticated
-using ((auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com')
-with check ((auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+create policy "Public can update media collection"
+on public.media_items
+for update to anon, authenticated
+using (true) with check (true);
 
-create policy "Admin can delete media collection"
-on public.media_items for delete
-to authenticated
-using ((auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+create policy "Public can delete media collection"
+on public.media_items
+for delete to anon, authenticated
+using (true);
 
+-- Required Data API grants for the browser client.
+grant select, insert, update, delete on public.media_items to anon, authenticated;
+
+-- Create the poster bucket.
 insert into storage.buckets (id, name, public)
 values ('media-posters', 'media-posters', true)
 on conflict (id) do update set public = true;
 
-drop policy if exists "Public can read media posters" on storage.objects;
-drop policy if exists "Public can upload media posters" on storage.objects;
-drop policy if exists "Public can update media posters" on storage.objects;
-drop policy if exists "Public can delete media posters" on storage.objects;
-drop policy if exists "Admin can upload media posters" on storage.objects;
-drop policy if exists "Admin can update media posters" on storage.objects;
-drop policy if exists "Admin can delete media posters" on storage.objects;
-
+-- Storage policies: the bucket is public for viewing, and the site can upload/update/delete posters.
 create policy "Public can read media posters"
-on storage.objects for select
-to anon, authenticated using (bucket_id = 'media-posters');
+on storage.objects
+for select to anon, authenticated
+using (bucket_id = 'media-posters');
 
-create policy "Admin can upload media posters"
-on storage.objects for insert
-to authenticated
-with check (bucket_id = 'media-posters' and (auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+create policy "Public can upload media posters"
+on storage.objects
+for insert to anon, authenticated
+with check (bucket_id = 'media-posters');
 
-create policy "Admin can update media posters"
-on storage.objects for update
-to authenticated
-using (bucket_id = 'media-posters' and (auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com')
-with check (bucket_id = 'media-posters' and (auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+create policy "Public can update media posters"
+on storage.objects
+for update to anon, authenticated
+using (bucket_id = 'media-posters')
+with check (bucket_id = 'media-posters');
 
-create policy "Admin can delete media posters"
-on storage.objects for delete
-to authenticated
-using (bucket_id = 'media-posters' and (auth.jwt() ->> 'email') = 'YOUR_ADMIN_EMAIL@example.com');
+create policy "Public can delete media posters"
+on storage.objects
+for delete to anon, authenticated
+using (bucket_id = 'media-posters');

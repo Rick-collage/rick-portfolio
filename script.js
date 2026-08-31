@@ -23,35 +23,25 @@ const mediaTabs = document.querySelectorAll(".media-tab");
 const mediaSearch = document.getElementById("mediaSearch");
 const clearMediaSearch = document.getElementById("clearMediaSearch");
 const mediaSort = document.getElementById("mediaSort");
-const mediaPagination = document.getElementById("mediaPagination");
-const adminLoginModal = document.getElementById("adminLoginModal");
-const adminLoginForm = document.getElementById("adminLoginForm");
-const adminEmail = document.getElementById("adminEmail");
-const adminPassword = document.getElementById("adminPassword");
-const adminLoginStatus = document.getElementById("adminLoginStatus");
-const adminLoginSubmit = document.getElementById("adminLoginSubmit");
-const adminLoginBtn = document.getElementById("adminLoginBtn");
-const adminLogoutBtn = document.getElementById("adminLogoutBtn");
-const closeAdminLogin = document.getElementById("closeAdminLogin");
-const toggleAdminPassword = document.getElementById("toggleAdminPassword");
-
-/* ===== Shared Supabase collection ===== */
-const SUPABASE_URL = window.SUPABASE_CONFIG?.url || "";
-const SUPABASE_KEY = window.SUPABASE_CONFIG?.publishableKey || "";
-const supabaseClient = (window.supabase && SUPABASE_URL && SUPABASE_KEY)
-  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
-  : null;
 
 let currentType = "movie";
 let currentSearch = "";
 let currentSort = "recent";
-let currentPage = 1;
-const MEDIA_PAGE_SIZE = 12;
-const PAGINATED_TYPES = new Set(["movie", "anime", "webseries"]);
 let mediaItems = [];
 let collectionReady = false;
 let imageObjectUrls = new Set();
-let fetchedPosterUrl = "";
+
+const DB_NAME = "rickPortfolioDB";
+const DB_VERSION = 1;
+const ITEMS_STORE = "mediaItems";
+const IMAGES_STORE = "mediaImages";
+
+/* Free OMDb API key — https://www.omdbapi.com/apikey.aspx (1,000 req/day) */
+const OMDB_API_KEY = "3161b39f";
+
+// Temporary poster blob from IMDb auto-fetch (used on Save if no file chosen)
+let fetchedPosterBlob = null;
+let fetchedPosterObjectUrl = null;
 
 function getTypeLabel(type) {
   return type === "movie" ? "Movie" : type === "anime" ? "Anime" : "Web Series";
@@ -65,20 +55,25 @@ function setImdbStatus(message, state = "") {
 }
 
 function clearFetchedPoster() {
-  fetchedPosterUrl = "";
+  fetchedPosterBlob = null;
+  if (fetchedPosterObjectUrl) {
+    URL.revokeObjectURL(fetchedPosterObjectUrl);
+    fetchedPosterObjectUrl = null;
+  }
   const preview = document.getElementById("posterPreview");
   const img = document.getElementById("posterPreviewImg");
   if (preview) preview.hidden = true;
   if (img) img.removeAttribute("src");
 }
 
-function showFetchedPoster(url) {
+function showFetchedPoster(blob) {
   clearFetchedPoster();
-  if (!url) return;
-  fetchedPosterUrl = url;
+  if (!blob) return;
+  fetchedPosterBlob = blob;
+  fetchedPosterObjectUrl = URL.createObjectURL(blob);
   const preview = document.getElementById("posterPreview");
   const img = document.getElementById("posterPreviewImg");
-  if (img) img.src = url;
+  if (img) img.src = fetchedPosterObjectUrl;
   if (preview) preview.hidden = false;
 }
 
@@ -88,308 +83,674 @@ function extractImdbId(input) {
   const urlMatch = value.match(/imdb\.com\/title\/(tt\d{5,})/i);
   if (urlMatch) return urlMatch[1].toLowerCase();
   const idMatch = value.match(/^(tt\d{5,})$/i);
-  return idMatch ? idMatch[1].toLowerCase() : null;
+  if (idMatch) return idMatch[1].toLowerCase();
+  return null;
 }
 
+/** Parse Rotten Tomatoes URL → { title, year, mediaKind } */
 function parseRottenTomatoesLink(input) {
   const value = String(input || "").trim();
-  const m = value.match(/rottentomatoes\.com\/(m|tv)\/([a-z0-9_]+)(?:\/s(\d+))?/i);
+  if (!value) return null;
+
+  // /m/slug or /tv/slug or /tv/slug/s01
+  const m = value.match(
+    /rottentomatoes\.com\/(m|tv)\/([a-z0-9_]+)(?:\/s(\d+))?/i
+  );
   if (!m) return null;
-  const kind = m[1].toLowerCase();
+
+  const kind = m[1].toLowerCase(); // m | tv
   let slug = m[2];
   const season = m[3] ? String(parseInt(m[3], 10)) : "";
+
+  // Trailing _YYYY year in slug
   let year = "";
   const yearMatch = slug.match(/_(\d{4})$/);
-  if (yearMatch) { year = yearMatch[1]; slug = slug.slice(0, -5); }
-  const title = slug.split("_").filter(Boolean).map(w => w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
-  return { title, year, season, mediaKind: kind === "tv" ? "series" : "movie" };
+  if (yearMatch) {
+    year = yearMatch[1];
+    slug = slug.slice(0, -5);
+  }
+
+  // snake_case → Title Case words
+  const title = slug
+    .split("_")
+    .filter(Boolean)
+    .map(w => {
+      // keep short all-caps tokens like "ai" optional; simple title case
+      if (w.length <= 2) return w.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(" ");
+
+  return {
+    title,
+    year,
+    season,
+    mediaKind: kind === "tv" ? "series" : "movie"
+  };
 }
 
 function parseMediaLink(input) {
   const value = String(input || "").trim();
   if (!value) return { type: "empty" };
+
   const imdbId = extractImdbId(value);
   if (imdbId) return { type: "imdb", imdbId };
+
   const rt = parseRottenTomatoesLink(value);
   if (rt) return { type: "rt", ...rt };
-  if (!/^https?:\/\//i.test(value) && value.length >= 2) return { type: "title", title: value };
+
+  // Bare title fallback (no URL)
+  if (!/^https?:\/\//i.test(value) && value.length >= 2) {
+    return { type: "title", title: value };
+  }
+
   return { type: "unknown" };
 }
 
-/* No API key is shipped to the browser. The Fetch button uses the optional
-   Supabase Edge Function `media-lookup` when it has been deployed. */
+function mapImdbRatingToStars(imdbRating) {
+  const n = parseFloat(imdbRating);
+  if (!Number.isFinite(n)) return "";
+  // Map IMDb 0–10 → 0–5 with one decimal (e.g. 8.6 → 4.3)
+  const mapped = Math.round((n / 2) * 10) / 10;
+  return String(Math.max(0, Math.min(5, mapped)));
+}
+
+async function fetchFromOmdbById(imdbId) {
+  if (!OMDB_API_KEY) {
+    throw new Error(
+      "OMDb API key is missing. Get a free key at https://www.omdbapi.com/apikey.aspx and paste it into script.js (OMDB_API_KEY)."
+    );
+  }
+  const url = `https://www.omdbapi.com/?i=${encodeURIComponent(imdbId)}&plot=full&apikey=${encodeURIComponent(OMDB_API_KEY)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`OMDb request failed (${res.status}).`);
+  const data = await res.json();
+  if (data.Response === "False") throw new Error(data.Error || "Title not found on OMDb.");
+  return data;
+}
+
+async function fetchFromOmdbByTitle(title, year = "", preferType = "") {
+  if (!OMDB_API_KEY) {
+    throw new Error(
+      "OMDb API key is missing. Get a free key at https://www.omdbapi.com/apikey.aspx and paste it into script.js (OMDB_API_KEY)."
+    );
+  }
+
+  const params = new URLSearchParams({
+    t: title,
+    plot: "full",
+    apikey: OMDB_API_KEY
+  });
+  if (year) params.set("y", year);
+  if (preferType === "series") params.set("type", "series");
+  else if (preferType === "movie") params.set("type", "movie");
+
+  const res = await fetch(`https://www.omdbapi.com/?${params.toString()}`);
+  if (!res.ok) throw new Error(`OMDb request failed (${res.status}).`);
+  const data = await res.json();
+
+  if (data.Response === "False") {
+    // Retry without year / type if first attempt failed
+    const retryParams = new URLSearchParams({
+      t: title,
+      plot: "full",
+      apikey: OMDB_API_KEY
+    });
+    const retry = await fetch(`https://www.omdbapi.com/?${retryParams.toString()}`);
+    const retryData = await retry.json();
+    if (retryData.Response === "False") {
+      throw new Error(data.Error || `No match found for "${title}".`);
+    }
+    return retryData;
+  }
+  return data;
+}
+
+
+async function fetchPosterBlob(posterUrl) {
+  if (!posterUrl || posterUrl === "N/A") return null;
+
+  const tryFetch = async (url, mode) => {
+    const res = await fetch(url, mode ? { mode } : undefined);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size < 100) return null;
+    if (blob.type.startsWith("image/") || !blob.type || blob.type === "application/octet-stream") {
+      return blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    }
+    return null;
+  };
+
+  // 1) Direct (Amazon CDN often allows CORS *)
+  try {
+    const blob = await tryFetch(posterUrl, "cors");
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] Direct fetch failed:", err);
+  }
+
+  // 2) corsproxy.io
+  try {
+    const blob = await tryFetch("https://corsproxy.io/?" + encodeURIComponent(posterUrl));
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] corsproxy failed:", err);
+  }
+
+  // 3) allorigins
+  try {
+    const blob = await tryFetch(
+      "https://api.allorigins.win/raw?url=" + encodeURIComponent(posterUrl)
+    );
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] allorigins failed:", err);
+  }
+
+  // 4) <img> + canvas fallback
+  try {
+    const blob = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      const timer = setTimeout(() => {
+        reject(new Error("Poster image load timeout"));
+      }, 12000);
+      img.onload = () => {
+        clearTimeout(timer);
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("No canvas context"));
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob(
+            b => (b ? resolve(b) : reject(new Error("toBlob failed"))),
+            "image/jpeg",
+            0.85
+          );
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("Image element failed to load poster"));
+      };
+      img.src = posterUrl;
+    });
+    if (blob) return blob;
+  } catch (err) {
+    console.warn("[Poster] canvas fallback failed:", err);
+  }
+
+  return null;
+}
+
+async function applyOmdbDataToForm(data, extras = {}) {
+  document.getElementById("mediaName").value = data.Title || "";
+  document.getElementById("mediaYear").value =
+    (data.Year || extras.year || "").replace(/[^0-9].*$/, "") || "";
+  document.getElementById("mediaGenre").value =
+    data.Genre && data.Genre !== "N/A" ? normalizeGenres(data.Genre) : "";
+  document.getElementById("mediaDescription").value =
+    data.Plot && data.Plot !== "N/A" ? data.Plot : "";
+
+  // Seasons: prefer OMDb totalSeasons, else RT season if provided
+  let seasons = "";
+  if (data.totalSeasons && data.totalSeasons !== "N/A") {
+    seasons = data.totalSeasons;
+  } else if (extras.season) {
+    seasons = extras.season;
+  }
+  document.getElementById("mediaParts").value = seasons;
+  document.getElementById("mediaRating").value = mapImdbRatingToStars(data.imdbRating);
+
+  setImdbStatus("Downloading poster…", "loading");
+  const posterBlob = await fetchPosterBlob(data.Poster);
+  if (posterBlob) {
+    try {
+      const resized = await resizeImageFromBlob(posterBlob);
+      showFetchedPoster(resized || posterBlob);
+    } catch {
+      showFetchedPoster(posterBlob);
+    }
+    setImdbStatus(`Filled: ${data.Title} (${data.Year || "n/a"}) · poster ready`, "success");
+  } else {
+    setImdbStatus(
+      `Filled: ${data.Title} (${data.Year || "n/a"}) · poster unavailable (upload manually)`,
+      "success"
+    );
+  }
+}
+
 async function handleImdbFetch() {
   const input = document.getElementById("imdbLink");
   const btn = document.getElementById("imdbFetchBtn");
   if (!input || !btn) return;
-  const parsed = parseMediaLink(input.value);
-  if (parsed.type === "empty") { setImdbStatus("Paste an IMDb or Rotten Tomatoes link, or a title.", "error"); return; }
-  if (parsed.type === "unknown") { setImdbStatus("Use an IMDb link, Rotten Tomatoes link, IMDb ID (tt1234567), or a title.", "error"); return; }
-  if (!supabaseClient) { setImdbStatus("Supabase is not configured. You can still add entries manually.", "error"); return; }
 
-  // The lookup function is protected. Make sure the admin is signed in so
-  // the user's Supabase Auth token is attached to the function request.
-  if (!(await requireAdmin())) {
-    setImdbStatus("Sign in as admin to use auto-fill.", "error");
+  const parsed = parseMediaLink(input.value);
+  if (parsed.type === "empty") {
+    setImdbStatus("Paste an IMDb or Rotten Tomatoes link (or an IMDb ID).", "error");
+    input.focus();
+    return;
+  }
+  if (parsed.type === "unknown") {
+    setImdbStatus("Unrecognized link. Use IMDb, Rotten Tomatoes, or a title.", "error");
+    input.focus();
     return;
   }
 
   btn.disabled = true;
+  clearFetchedPoster();
+
   try {
-    setImdbStatus("Looking up media…", "loading");
-    const { data, error } = await supabaseClient.functions.invoke("media-lookup", { body: parsed });
-    if (error) {
-      let detail = error.message || "Function request failed.";
-      try {
-        if (error.context && typeof error.context.json === "function") {
-          const body = await error.context.json();
-          if (body?.error) detail = body.error;
-        }
-      } catch (_) {}
-      throw new Error(detail);
+    let data;
+
+    if (parsed.type === "imdb") {
+      setImdbStatus("Fetching from IMDb…", "loading");
+      data = await fetchFromOmdbById(parsed.imdbId);
+      await applyOmdbDataToForm(data);
+    } else if (parsed.type === "rt") {
+      setImdbStatus(`Looking up “${parsed.title}” from Rotten Tomatoes link…`, "loading");
+      data = await fetchFromOmdbByTitle(parsed.title, parsed.year, parsed.mediaKind);
+      await applyOmdbDataToForm(data, { year: parsed.year, season: parsed.season });
+    } else if (parsed.type === "title") {
+      setImdbStatus(`Searching “${parsed.title}”…`, "loading");
+      data = await fetchFromOmdbByTitle(parsed.title, "", "");
+      await applyOmdbDataToForm(data);
     }
-    if (!data?.title) throw new Error("No media match was returned.");
-    document.getElementById("mediaName").value = data.title || "";
-    document.getElementById("mediaYear").value = data.year || "";
-    document.getElementById("mediaGenre").value = normalizeGenres(data.genre || "");
-    document.getElementById("mediaParts").value = data.parts || "";
-    document.getElementById("mediaRating").value = data.rating || "";
-    document.getElementById("mediaDescription").value = data.description || "";
-    if (data.posterUrl) showFetchedPoster(data.posterUrl);
-    setImdbStatus(`Filled: ${data.title}${data.posterUrl ? " · poster ready" : ""}`, "success");
   } catch (error) {
     console.error("[Media link] Fetch failed:", error);
-    setImdbStatus(`Auto-fill failed: ${error?.message || "Unknown error"}`, "error");
-  } finally { btn.disabled = false; }
+    setImdbStatus(error.message || "Could not fetch media data.", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function resizeImageFromBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const max = 900;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          resolve(blob);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          result => {
+            URL.revokeObjectURL(url);
+            resolve(result || blob);
+          },
+          "image/jpeg",
+          0.78
+        );
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not decode poster image."));
+    };
+    img.src = url;
+  });
 }
 
 function showMediaError(message, error = null) {
   const detail = error?.message ? `\n\nTechnical detail: ${error.message}` : "";
-  alert(`COLLECTION ERROR\n\n${message}${detail}`);
+  alert(`SAVE ERROR\n\n${message}${detail}`);
 }
 
 function stars(rating) {
   const n = parseFloat(rating);
   if (!Number.isFinite(n) || n <= 0) return "";
+
   const clamped = Math.max(0, Math.min(5, n));
   const full = Math.floor(clamped);
   const frac = clamped - full;
   let out = "★".repeat(full);
-  if (frac >= 0.75 && full < 5) out += "★";
-  else if (frac >= 0.25 && full < 5) out += "½";
+
+  // half star for .3 – .7 range, full for higher fraction
+  if (frac >= 0.75 && full < 5) {
+    out += "★";
+  } else if (frac >= 0.25 && full < 5) {
+    out += "½";
+  }
+
+  const empty = 5 - out.replace(/½/g, "★").length;
+  // count visual slots: full stars + optional half = slots used
   const slots = full + (frac >= 0.25 && full < 5 ? 1 : 0);
   out += "☆".repeat(Math.max(0, 5 - slots));
-  return `${out} ${Number.isInteger(clamped) ? clamped : clamped.toFixed(1)}`;
+
+  // show numeric value too, e.g. 4.3
+  const shown = Number.isInteger(clamped) ? String(clamped) : clamped.toFixed(1);
+  return `${out} ${shown}`;
 }
+
 
 function normalizeGenres(value) {
-  return String(value || "").split(",").map(g => g.trim()).filter(Boolean).join(", ");
+  return String(value || "")
+    .split(",")
+    .map(g => g.trim())
+    .filter(Boolean)
+    .join(", ");
 }
+
 function genreTagsHtml(genre) {
-  const parts = String(genre || "").split(",").map(g => g.trim()).filter(Boolean);
-  return parts.length ? `<div class="genre-tags">${parts.map(g => `<span class="genre-tag">${escapeHtml(g)}</span>`).join("")}</div>` : "";
+  const parts = String(genre || "")
+    .split(",")
+    .map(g => g.trim())
+    .filter(Boolean);
+  if (!parts.length) return "";
+  return `<div class="genre-tags">${parts.map(g => `<span class="genre-tag">${escapeHtml(g)}</span>`).join("")}</div>`;
 }
+
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]));
+  return String(value).replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+  }[char]));
 }
 
-let adminLoginResolver = null;
-
-function setAdminLoginStatus(message, state = "") {
-  if (!adminLoginStatus) return;
-  adminLoginStatus.textContent = message || "";
-  adminLoginStatus.className = "admin-login-status" + (state ? ` is-${state}` : "");
-}
-
-function updateAdminUI(session) {
-  const signedIn = !!session;
-  if (adminLoginBtn) adminLoginBtn.hidden = signedIn;
-  if (adminLogoutBtn) adminLogoutBtn.hidden = !signedIn;
-  if (adminLoginBtn) adminLoginBtn.setAttribute("aria-label", signedIn ? "Signed in as admin" : "Open admin login");
-}
-
-function openAdminLogin() {
-  if (!adminLoginModal) return Promise.resolve(false);
-  setAdminLoginStatus("");
-  if (adminEmail) adminEmail.value = "";
-  if (adminPassword) adminPassword.value = "";
-  adminLoginModal.classList.add("show");
-  adminLoginModal.setAttribute("aria-hidden", "false");
-  window.setTimeout(() => adminEmail?.focus(), 40);
-  return new Promise(resolve => { adminLoginResolver = resolve; });
-}
-
-function closeAdminLoginModal(result = false) {
-  if (!adminLoginModal) return;
-  adminLoginModal.classList.remove("show");
-  adminLoginModal.setAttribute("aria-hidden", "true");
-  adminLoginForm?.reset();
-  if (adminLoginResolver) {
-    const resolve = adminLoginResolver;
-    adminLoginResolver = null;
-    resolve(result);
+function verifyPassword() {
+  const password = prompt("Enter password to continue:");
+  if (password === "186290") {
+    return true;
+  } else if (password !== null) {
+    alert("Incorrect password!");
   }
+  return false;
 }
 
-async function requireAdmin() {
-  if (!supabaseClient) {
-    showMediaError("Supabase is not configured. Add your Supabase URL and publishable key first.");
-    return false;
-  }
-  const { data: { session } } = await supabaseClient.auth.getSession();
-  updateAdminUI(session);
-  if (session) return true;
-  return openAdminLogin();
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB is not supported by this browser."));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = event => {
+      const db = event.target.result;
+
+      if (!db.objectStoreNames.contains(ITEMS_STORE)) {
+        db.createObjectStore(ITEMS_STORE, { keyPath: "id" });
+      }
+
+      if (!db.objectStoreNames.contains(IMAGES_STORE)) {
+        db.createObjectStore(IMAGES_STORE);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open browser database."));
+  });
 }
 
-if (supabaseClient) {
-  supabaseClient.auth.onAuthStateChange((_event, session) => updateAdminUI(session));
+let dbPromise = openDatabase();
+
+async function dbGetAllItems() {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ITEMS_STORE, "readonly");
+    const request = tx.objectStore(ITEMS_STORE).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
 }
 
-adminLoginBtn?.addEventListener("click", () => openAdminLogin());
-closeAdminLogin?.addEventListener("click", () => closeAdminLoginModal(false));
-adminLoginModal?.addEventListener("click", event => {
-  if (event.target === adminLoginModal) closeAdminLoginModal(false);
-});
+async function dbPutItem(item) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ITEMS_STORE, "readwrite");
+    tx.objectStore(ITEMS_STORE).put(item);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
+  });
+}
 
-toggleAdminPassword?.addEventListener("click", () => {
-  if (!adminPassword) return;
-  const showing = adminPassword.type === "text";
-  adminPassword.type = showing ? "password" : "text";
-  toggleAdminPassword.textContent = showing ? "Show" : "Hide";
-  toggleAdminPassword.setAttribute("aria-label", showing ? "Show password" : "Hide password");
-  toggleAdminPassword.title = showing ? "Show password" : "Hide password";
-});
+async function dbDeleteItem(id) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([ITEMS_STORE, IMAGES_STORE], "readwrite");
+    tx.objectStore(ITEMS_STORE).delete(id);
+    tx.objectStore(IMAGES_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
+  });
+}
 
-adminLoginForm?.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!supabaseClient) {
-    setAdminLoginStatus("Supabase is not configured.", "error");
-    return;
+async function dbPutImage(id, blob) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMAGES_STORE, "readwrite");
+    tx.objectStore(IMAGES_STORE).put(blob, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Database transaction was aborted."));
+  });
+}
+
+async function dbGetImage(id) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMAGES_STORE, "readonly");
+    const request = tx.objectStore(IMAGES_STORE).get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const parts = dataUrl.split(",");
+  const match = parts[0].match(/data:([^;]+);base64/);
+  if (!match || !parts[1]) {
+    throw new Error("Legacy poster data could not be converted.");
   }
-  const email = adminEmail?.value.trim() || "";
-  const password = adminPassword?.value || "";
-  if (!email || !adminPassword?.checkValidity()) {
-    setAdminLoginStatus("Enter a valid email and password.", "error");
-    return;
+
+  const mime = match[1];
+  const binary = atob(parts[1]);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
   }
-  adminLoginSubmit.disabled = true;
-  setAdminLoginStatus("Signing in…", "loading");
+
+  return new Blob([bytes], { type: mime });
+}
+
+/*
+ * One-time migration:
+ * Older versions stored poster Base64 strings in localStorage under
+ * "rickMediaCollection". We move those posters into IndexedDB and keep
+ * only lightweight metadata in the database.
+ */
+async function migrateLegacyCollection() {
+  let raw = null;
+
   try {
-    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    updateAdminUI(data.session);
-    setAdminLoginStatus("Signed in successfully.", "success");
-    window.setTimeout(() => closeAdminLoginModal(true), 250);
+    raw = localStorage.getItem("rickMediaCollection");
   } catch (error) {
-    console.error("[Admin] Sign-in failed:", error);
-    setAdminLoginStatus("Sign-in failed. Check your Supabase Auth email and password.", "error");
-  } finally {
-    adminLoginSubmit.disabled = false;
+    console.warn("[Collection] Could not read legacy localStorage data:", error);
+    return;
   }
-});
 
-(async () => {
-  if (!supabaseClient) return;
-  const { data: { session } } = await supabaseClient.auth.getSession();
-  updateAdminUI(session);
-})();
+  if (!raw) return;
 
-adminLogoutBtn?.addEventListener("click", async () => {
-  if (!supabaseClient) return;
-  const { error } = await supabaseClient.auth.signOut();
-  if (error) showMediaError("Could not sign out.", error);
-  else updateAdminUI(null);
-});
+  let legacyItems;
+  try {
+    legacyItems = JSON.parse(raw);
+    if (!Array.isArray(legacyItems)) {
+      throw new Error("Legacy collection is not a valid list.");
+    }
+  } catch (error) {
+    console.error("[Collection] Legacy collection could not be parsed:", error);
+    return;
+  }
 
-function imagePublicUrl(path) {
-  if (!path || !supabaseClient) return "";
-  const { data } = supabaseClient.storage.from("media-posters").getPublicUrl(path);
-  return data?.publicUrl || "";
+  if (!legacyItems.length) {
+    try { localStorage.removeItem("rickMediaCollection"); } catch (_) {}
+    return;
+  }
+
+  try {
+    for (const legacy of legacyItems) {
+      const id = legacy.id || (
+        crypto.randomUUID
+          ? crypto.randomUUID()
+          : `media-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      );
+
+      const item = {
+        id,
+        type: legacy.type,
+        name: legacy.name || "",
+        year: legacy.year || "",
+        genre: legacy.genre || "",
+        parts: legacy.parts || "",
+        rating: legacy.rating || "",
+        description: legacy.description || "",
+        imageKey: "",
+        addedAt: Number(legacy.addedAt) || Date.now()
+      };
+
+      if (legacy.image && typeof legacy.image === "string") {
+        try {
+          const blob = dataUrlToBlob(legacy.image);
+          await dbPutImage(id, blob);
+          item.imageKey = id;
+        } catch (imageError) {
+          console.warn(`[Collection] Could not migrate poster for "${item.name}":`, imageError);
+        }
+      }
+
+      await dbPutItem(item);
+    }
+
+    // Remove the old Base64 collection only after migration succeeds.
+    localStorage.removeItem("rickMediaCollection");
+    console.info("[Collection] Legacy collection migrated to IndexedDB.");
+  } catch (error) {
+    console.error("[Collection] Legacy migration failed:", error);
+    throw new Error(
+      "Your old collection could not be migrated completely. Your existing browser data was left untouched."
+    );
+  }
+}
+
+/* Starter collection — only used when the database is empty */
+const SEED_ITEMS = [
+  // Movies
+  { id: "seed-movie-1", type: "movie", name: "Interstellar", year: "2014", genre: "Sci-Fi", parts: "1", rating: "5", description: "A team of explorers travel through a wormhole in space in an attempt to ensure humanity's survival.", imageKey: "", addedAt: Date.now() - 900000 },
+  { id: "seed-movie-2", type: "movie", name: "The Dark Knight", year: "2008", genre: "Action", parts: "1", rating: "5", description: "Batman faces the Joker, a criminal mastermind who plunges Gotham into chaos.", imageKey: "", addedAt: Date.now() - 800000 },
+  { id: "seed-movie-3", type: "movie", name: "Inception", year: "2010", genre: "Sci-Fi", parts: "1", rating: "5", description: "A thief who steals corporate secrets through dream-sharing technology is given the inverse task of planting an idea.", imageKey: "", addedAt: Date.now() - 700000 },
+  { id: "seed-movie-4", type: "movie", name: "Spirited Away", year: "2001", genre: "Fantasy", parts: "1", rating: "5", description: "A young girl enters a world of spirits and must find a way to free her parents and return home.", imageKey: "", addedAt: Date.now() - 600000 },
+  { id: "seed-movie-5", type: "movie", name: "Dune", year: "2021", genre: "Sci-Fi", parts: "2", rating: "4", description: "Paul Atreides leads a rebellion on the desert planet Arrakis to avenge his family and fulfill his destiny.", imageKey: "", addedAt: Date.now() - 500000 },
+  // Anime
+  { id: "seed-anime-1", type: "anime", name: "Attack on Titan", year: "2013", genre: "Action", parts: "4", rating: "5", description: "Humanity fights for survival against giant humanoid Titans behind enormous walls.", imageKey: "", addedAt: Date.now() - 400000 },
+  { id: "seed-anime-2", type: "anime", name: "Demon Slayer", year: "2019", genre: "Action", parts: "4", rating: "5", description: "Tanjiro joins the Demon Slayer Corps to avenge his family and cure his sister.", imageKey: "", addedAt: Date.now() - 350000 },
+  { id: "seed-anime-3", type: "anime", name: "Jujutsu Kaisen", year: "2020", genre: "Action", parts: "2", rating: "5", description: "A boy swallows a cursed object and joins a secret organization of jujutsu sorcerers.", imageKey: "", addedAt: Date.now() - 300000 },
+  { id: "seed-anime-4", type: "anime", name: "One Piece", year: "1999", genre: "Adventure", parts: "20", rating: "5", description: "Monkey D. Luffy and his crew search for the legendary One Piece treasure.", imageKey: "", addedAt: Date.now() - 250000 },
+  { id: "seed-anime-5", type: "anime", name: "Death Note", year: "2006", genre: "Thriller", parts: "1", rating: "5", description: "A high school student finds a notebook that kills anyone whose name is written in it.", imageKey: "", addedAt: Date.now() - 200000 },
+  // Web Series
+  { id: "seed-series-1", type: "webseries", name: "Stranger Things", year: "2016", genre: "Sci-Fi", parts: "4", rating: "5", description: "Kids in a small town face supernatural forces and government secrets in the 1980s.", imageKey: "", addedAt: Date.now() - 150000 },
+  { id: "seed-series-2", type: "webseries", name: "The Boys", year: "2019", genre: "Action", parts: "4", rating: "5", description: "A group of vigilantes take on corrupt superheroes who abuse their powers.", imageKey: "", addedAt: Date.now() - 120000 },
+  { id: "seed-series-3", type: "webseries", name: "Dark", year: "2017", genre: "Mystery", parts: "3", rating: "5", description: "A missing child sets four families on a collision course across time in a German town.", imageKey: "", addedAt: Date.now() - 100000 },
+  { id: "seed-series-4", type: "webseries", name: "Arcane", year: "2021", genre: "Fantasy", parts: "2", rating: "5", description: "The origins of two legendary sisters from the League of Legends universe.", imageKey: "", addedAt: Date.now() - 80000 },
+  { id: "seed-series-5", type: "webseries", name: "Breaking Bad", year: "2008", genre: "Drama", parts: "5", rating: "5", description: "A chemistry teacher turns to cooking meth after a cancer diagnosis.", imageKey: "", addedAt: Date.now() - 60000 }
+];
+
+async function seedCollectionIfEmpty() {
+  if (mediaItems.length > 0) return;
+  try {
+    for (const item of SEED_ITEMS) {
+      await dbPutItem(item);
+    }
+    mediaItems = [...SEED_ITEMS];
+    console.info("[Collection] Seeded starter movies, anime, and web series.");
+  } catch (error) {
+    console.warn("[Collection] Could not seed starter data:", error);
+  }
 }
 
 async function loadMedia() {
-  if (!supabaseClient) throw new Error("Supabase client is unavailable. Check supabase-config.js and the Supabase CDN script.");
-  const { data, error } = await supabaseClient.from("media_items").select("*").order("added_at", { ascending: false });
-  if (error) throw error;
-  mediaItems = (data || []).map(item => ({ ...item, imageKey: item.image_path || "", addedAt: Date.parse(item.added_at) || Date.now() }));
-  collectionReady = true;
+  try {
+    await migrateLegacyCollection();
+    mediaItems = await dbGetAllItems();
+    await seedCollectionIfEmpty();
+    collectionReady = true;
+  } catch (error) {
+    collectionReady = false;
+    console.error("[Collection] Failed to load:", error);
+    showMediaError(
+      "Could not load your collection from browser storage.",
+      error
+    );
+  }
 }
 
-function getMediaAddedAt(item) { return Number(item.addedAt) || 0; }
+function revokeImageUrls() {
+  imageObjectUrls.forEach(url => URL.revokeObjectURL(url));
+  imageObjectUrls.clear();
+}
+
+function getMediaAddedAt(item) {
+  const value = Number(item.addedAt);
+  if (Number.isFinite(value) && value > 0) return value;
+
+  // Older entries may not have an addedAt value. Use their ID timestamp when
+  // available, otherwise keep them at the end of the Recently Added list.
+  const match = String(item.id || "").match(/media-(\d+)-/);
+  return match ? Number(match[1]) : 0;
+}
+
 function getMediaSortValue(item) {
   if (currentSort === "year") return Number(item.year) || 0;
   if (currentSort === "season") return Number(item.parts) || 0;
   if (currentSort === "name") return String(item.name || "").trim().toLocaleLowerCase();
   return getMediaAddedAt(item);
 }
+
 function sortMediaItems(items) {
-  return [...items].sort((a,b) => {
-    const av=getMediaSortValue(a), bv=getMediaSortValue(b);
-    if(currentSort === "name") return av.localeCompare(bv, undefined, {sensitivity:"base"});
-    if(currentSort === "season") return av-bv || String(a.name||"").localeCompare(String(b.name||""));
-    return bv-av || String(a.name||"").localeCompare(String(b.name||""));
-  });
-}
-function getSearchText(item) { return [item.name,item.genre,item.year,item.parts,item.description].filter(v=>v!==undefined&&v!==null).join(" ").toLocaleLowerCase(); }
+  return [...items].sort((a, b) => {
+    const av = getMediaSortValue(a);
+    const bv = getMediaSortValue(b);
 
-function revokeImageUrls() { imageObjectUrls.forEach(url => URL.revokeObjectURL(url)); imageObjectUrls.clear(); }
-
-function getPaginationItems(totalPages, page) {
-  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
-
-  const items = [1];
-  const start = Math.max(2, page - 1);
-  const end = Math.min(totalPages - 1, page + 1);
-
-  if (start > 2) items.push("ellipsis-left");
-  for (let n = start; n <= end; n++) items.push(n);
-  if (end < totalPages - 1) items.push("ellipsis-right");
-  items.push(totalPages);
-  return items;
-}
-
-function renderMediaPagination(totalItems) {
-  if (!mediaPagination) return;
-  const enabled = PAGINATED_TYPES.has(currentType);
-  const totalPages = Math.max(1, Math.ceil(totalItems / MEDIA_PAGE_SIZE));
-
-  if (!enabled || totalItems <= MEDIA_PAGE_SIZE) {
-    mediaPagination.hidden = true;
-    mediaPagination.innerHTML = "";
-    return;
-  }
-
-  currentPage = Math.min(Math.max(1, currentPage), totalPages);
-  const button = (label, page, className = "", disabled = false, aria = label) =>
-    `<button type="button" class="page-btn ${className}" data-page="${page}" ${disabled ? "disabled" : ""} aria-label="${escapeHtml(aria)}" ${page === currentPage ? 'aria-current="page"' : ""}>${label}</button>`;
-
-  let html = button("«", 1, "page-first", currentPage === 1, "First page");
-  html += button("‹", currentPage - 1, "page-prev", currentPage === 1, "Previous page");
-
-  for (const item of getPaginationItems(totalPages, currentPage)) {
-    if (typeof item === "string") {
-      html += `<span class="page-ellipsis" aria-hidden="true">…</span>`;
-    } else {
-      html += button(String(item), item, item === currentPage ? "active" : "", false, `Page ${item}`);
+    if (currentSort === "name") {
+      return av.localeCompare(bv, undefined, { sensitivity: "base" });
     }
-  }
 
-  html += button("›", currentPage + 1, "page-next", currentPage === totalPages, "Next page");
-  html += button("»", totalPages, "page-last", currentPage === totalPages, "Last page");
+    // Recently Added and Year show newest/highest first.
+    if (currentSort === "recent" || currentSort === "year") {
+      return bv - av || String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+    }
 
-  mediaPagination.innerHTML = html;
-  mediaPagination.hidden = false;
-  mediaPagination.querySelectorAll(".page-btn:not(:disabled)").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const page = Number(btn.dataset.page);
-      if (!Number.isFinite(page) || page === currentPage) return;
-      currentPage = page;
-      renderMedia();
-      const section = document.getElementById("movies");
-      if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    // Season shows Season 1, Season 2, Season 3...
+    return av - bv || String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
   });
+}
+
+function getSearchText(item) {
+  return [item.name, item.genre, item.year, item.parts, item.description]
+    .filter(value => value !== undefined && value !== null)
+    .join(" ")
+    .toLocaleLowerCase();
 }
 
 async function renderMedia() {
@@ -400,7 +761,6 @@ async function renderMedia() {
     emptyMedia.style.display = "block";
     emptyMedia.querySelector("h3").textContent = "Collection unavailable";
     emptyMedia.querySelector("p").textContent = "Refresh the page and try again.";
-    if (mediaPagination) mediaPagination.hidden = true;
     return;
   }
 
@@ -416,138 +776,383 @@ async function renderMedia() {
   if (!filtered.length && query) {
     emptyMedia.querySelector("h3").textContent = "No results found";
     emptyMedia.querySelector("p").textContent = `Nothing matches “${currentSearch.trim()}”. Try another search.`;
-  } else if (!filtered.length) {
+  } else {
     emptyMedia.querySelector("h3").textContent = "No favorites yet";
     emptyMedia.querySelector("p").innerHTML =
       'Click <strong>Add New</strong> to add your first movie, anime, or series.';
   }
 
-  if (!filtered.length) {
-    renderMediaPagination(0);
-    return;
-  }
-
-  const shouldPaginate = PAGINATED_TYPES.has(currentType);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / MEDIA_PAGE_SIZE));
-  if (currentPage > totalPages) currentPage = totalPages;
-  const start = shouldPaginate ? (currentPage - 1) * MEDIA_PAGE_SIZE : 0;
-  const visibleItems = shouldPaginate ? filtered.slice(start, start + MEDIA_PAGE_SIZE) : filtered;
-
-  for (const item of visibleItems) {
+  for (const item of filtered) {
     const card = document.createElement("article");
     card.className = "media-card";
+
     const posterWrap = document.createElement("div");
     posterWrap.className = "poster-wrap";
-    const posterUrl = imagePublicUrl(item.image_path || item.imageKey);
-    if (posterUrl) {
+
+    if (item.imageKey) {
       const img = document.createElement("img");
       img.alt = `${item.name} poster`;
-      img.loading = "lazy";
-      img.src = posterUrl;
-      posterWrap.appendChild(img);
+
+      try {
+        const blob = await dbGetImage(item.imageKey);
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          imageObjectUrls.add(url);
+          img.src = url;
+          posterWrap.appendChild(img);
+        } else {
+          throw new Error("Poster file was not found.");
+        }
+      } catch (error) {
+        console.warn(`[Collection] Poster could not be loaded for "${item.name}":`, error);
+        posterWrap.innerHTML = `<div class="poster-placeholder">${
+          item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"
+        }</div>`;
+      }
     } else {
-      posterWrap.innerHTML = `<div class="poster-placeholder">${item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"}</div>`;
+      posterWrap.innerHTML = `<div class="poster-placeholder">${
+        item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"
+      }</div>`;
     }
+
     const actions = document.createElement("div");
     actions.className = "media-actions";
-    actions.innerHTML = `<button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit ${escapeHtml(item.name)}">✎</button><button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete" aria-label="Delete ${escapeHtml(item.name)}">🗑</button>`;
+    actions.innerHTML = `
+      <button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit">✎</button>
+      <button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete">🗑</button>
+    `;
     posterWrap.appendChild(actions);
-    card.appendChild(posterWrap);
 
     const info = document.createElement("div");
     info.className = "media-info";
-    const yearBit = escapeHtml(item.year || "");
-    const partsBit = item.parts ? `${escapeHtml(item.parts)} ${item.type === "movie" ? (Number(item.parts) === 1 ? "Part" : "Parts") : (Number(item.parts) === 1 ? "Season" : "Seasons")}` : "";
-    info.innerHTML = `<h3>${escapeHtml(item.name)}</h3><p class="media-meta">${[yearBit, partsBit].filter(Boolean).join(" • ")}</p>${genreTagsHtml(item.genre)}${item.rating ? `<div class="rating">${stars(item.rating)}</div>` : ""}${item.description ? `<p class="media-description">${escapeHtml(item.description)}</p>` : ""}`;
+
+    const yearBit = item.year || "";
+    const partsBit = item.parts
+      ? `${escapeHtml(item.parts)} ${
+          item.type === "movie"
+            ? (Number(item.parts) === 1 ? "Part" : "Parts")
+            : (Number(item.parts) === 1 ? "Season" : "Seasons")
+        }`
+      : "";
+    const meta = [yearBit, partsBit].filter(Boolean).join(" • ");
+
+    info.innerHTML = `
+      <h3>${escapeHtml(item.name)}</h3>
+      <p class="media-meta">${meta}</p>
+      ${genreTagsHtml(item.genre)}
+      ${item.rating ? `<div class="rating">${stars(item.rating)}</div>` : ""}
+      ${item.description ? `<p class="media-description">${escapeHtml(item.description)}</p>` : ""}
+    `;
+
+    card.appendChild(posterWrap);
     card.appendChild(info);
     mediaGrid.appendChild(card);
   }
 
-  renderMediaPagination(filtered.length);
+  document.querySelectorAll(".edit-btn").forEach(btn => {
+    btn.addEventListener("click", () => openModal(btn.dataset.id));
+  });
 
-  document.querySelectorAll(".edit-btn").forEach(btn => btn.addEventListener("click", () => openModal(btn.dataset.id)));
-  document.querySelectorAll(".delete-btn").forEach(btn => btn.addEventListener("click", () => deleteMedia(btn.dataset.id)));
-}
-
-async function uploadPoster(itemId, fileOrUrl) {
-  let blob;
-  if (fileOrUrl instanceof Blob) blob = fileOrUrl;
-  else if (typeof fileOrUrl === "string") { const response = await fetch(fileOrUrl); if(!response.ok) throw new Error("Poster download failed."); blob=await response.blob(); }
-  if (!blob) return "";
-  const ext = (blob.type.split("/")[1] || "jpg").replace(/[^a-z0-9]/gi, "").slice(0,8) || "jpg";
-  const path = `${itemId}.${ext}`;
-  const { error } = await supabaseClient.storage.from("media-posters").upload(path, blob, { upsert:true, contentType:blob.type || "image/jpeg" });
-  if(error) throw error;
-  return path;
-}
-
-function resizeImage(file) {
-  return new Promise((resolve,reject)=>{
-    if(!file){resolve(null);return;} if(!file.type.startsWith("image/")){reject(new Error("The selected poster is not an image file."));return;}
-    const reader=new FileReader(); reader.onload=e=>{const img=new Image(); img.onload=()=>{const max=900, scale=Math.min(1,max/Math.max(img.width,img.height)); const canvas=document.createElement("canvas"); canvas.width=Math.max(1,Math.round(img.width*scale)); canvas.height=Math.max(1,Math.round(img.height*scale)); const ctx=canvas.getContext("2d"); if(!ctx){reject(new Error("Could not create image canvas."));return;} ctx.drawImage(img,0,0,canvas.width,canvas.height); canvas.toBlob(b=>b?resolve(b):reject(new Error("Could not process poster.")),"image/jpeg",.78);}; img.onerror=()=>reject(new Error("Poster image could not be decoded.")); img.src=e.target.result;}; reader.onerror=()=>reject(new Error("Could not read poster file.")); reader.readAsDataURL(file);
+  document.querySelectorAll(".delete-btn").forEach(btn => {
+    btn.addEventListener("click", () => deleteMedia(btn.dataset.id));
   });
 }
 
-async function openModal(id=null) {
-  if(!(await requireAdmin())) return;
-  mediaForm.reset(); clearFetchedPoster(); setImdbStatus("");
-  document.getElementById("mediaId").value=""; document.getElementById("mediaType").value=currentType; document.getElementById("modalTitle").textContent=`Add ${getTypeLabel(currentType)}`;
-  if(id){ const item=mediaItems.find(x=>x.id===id); if(!item)return; document.getElementById("modalTitle").textContent=`Edit ${getTypeLabel(item.type)}`; document.getElementById("mediaId").value=item.id; document.getElementById("mediaType").value=item.type; document.getElementById("mediaName").value=item.name||""; document.getElementById("mediaYear").value=item.year||""; document.getElementById("mediaGenre").value=item.genre||""; document.getElementById("mediaParts").value=item.parts||""; document.getElementById("mediaRating").value=item.rating||""; document.getElementById("mediaDescription").value=item.description||""; }
-  mediaModal.classList.add("show"); mediaModal.setAttribute("aria-hidden","false");
-}
-function closeModal(){mediaModal.classList.remove("show");mediaModal.setAttribute("aria-hidden","true");clearFetchedPoster();setImdbStatus("");}
+function openModal(id = null) {
+  if (!verifyPassword()) return;
 
-async function deleteMedia(id){
-  const item=mediaItems.find(x=>x.id===id); if(!item)return;
-  if(!(await requireAdmin()))return;
-  if(!confirm(`Delete "${item.name}"?`))return;
-  try{
-    const {error}=await supabaseClient.from("media_items").delete().eq("id",id); if(error)throw error;
-    if(item.image_path) await supabaseClient.storage.from("media-posters").remove([item.image_path]);
-    mediaItems=mediaItems.filter(x=>x.id!==id); await renderMedia();
-  }catch(error){console.error("[Collection] Delete failed:",error);showMediaError("Could not delete this item.",error);}
+  mediaForm.reset();
+  clearFetchedPoster();
+  setImdbStatus("");
+  document.getElementById("mediaId").value = "";
+  document.getElementById("mediaType").value = currentType;
+  const typeLabel = getTypeLabel(currentType);
+  document.getElementById("modalTitle").textContent = `Add ${typeLabel}`;
+
+  if (id) {
+    const item = mediaItems.find(x => x.id === id);
+    if (!item) return;
+
+    const editLabel = getTypeLabel(item.type);
+    document.getElementById("modalTitle").textContent = `Edit ${editLabel}`;
+    document.getElementById("mediaId").value = item.id;
+    document.getElementById("mediaType").value = item.type;
+    document.getElementById("mediaName").value = item.name;
+    document.getElementById("mediaYear").value = item.year || "";
+    document.getElementById("mediaGenre").value = item.genre || "";
+    document.getElementById("mediaParts").value = item.parts || "";
+    document.getElementById("mediaRating").value = item.rating || "";
+    document.getElementById("mediaDescription").value = item.description || "";
+  }
+
+  mediaModal.classList.add("show");
+  mediaModal.setAttribute("aria-hidden", "false");
 }
 
-mediaTabs.forEach(tab=>tab.addEventListener("click",()=>{mediaTabs.forEach(t=>t.classList.remove("active"));tab.classList.add("active");currentType=tab.dataset.type;currentPage=1;currentSearch="";mediaSearch.value="";mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;mediaSearch.parentElement.classList.remove("has-value");renderMedia();}));
-mediaSearch.addEventListener("input",()=>{currentPage=1;currentSearch=mediaSearch.value;mediaSearch.parentElement.classList.toggle("has-value",Boolean(currentSearch));renderMedia();});
-clearMediaSearch.addEventListener("click",()=>{currentPage=1;mediaSearch.value="";currentSearch="";mediaSearch.parentElement.classList.remove("has-value");mediaSearch.focus();renderMedia();});
-mediaSort.addEventListener("change",()=>{currentPage=1;currentSort=mediaSort.value;renderMedia();});
-mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;
-addMediaBtn.addEventListener("click",()=>openModal()); closeMediaModal.addEventListener("click",closeModal); cancelMedia.addEventListener("click",closeModal); mediaModal.addEventListener("click",e=>{if(e.target===mediaModal)closeModal();});
-document.addEventListener("keydown", event => {
-  if (event.key !== "Escape") return;
-  if (adminLoginModal?.classList.contains("show")) closeAdminLoginModal(false);
-  else if (mediaModal?.classList.contains("show")) closeModal();
+function closeModal() {
+  mediaModal.classList.remove("show");
+  mediaModal.setAttribute("aria-hidden", "true");
+  clearFetchedPoster();
+  setImdbStatus("");
+}
+
+async function deleteMedia(id) {
+  const item = mediaItems.find(x => x.id === id);
+  if (!item) return;
+
+  if (!verifyPassword()) return;
+
+  if (confirm(`Delete "${item.name}"?`)) {
+    try {
+      await dbDeleteItem(id);
+      mediaItems = mediaItems.filter(x => x.id !== id);
+      await renderMedia();
+    } catch (error) {
+      console.error("[Collection] Delete failed:", error);
+      showMediaError(`Could not delete this ${getTypeLabel(item.type).toLowerCase()}.`, error);
+    }
+  }
+}
+
+mediaTabs.forEach(tab => {
+  tab.addEventListener("click", () => {
+    mediaTabs.forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    currentType = tab.dataset.type;
+    currentSearch = "";
+    mediaSearch.value = "";
+    mediaSearch.placeholder = `Search ${getTypeLabel(currentType).toLowerCase()}...`;
+    mediaSearch.parentElement.classList.remove("has-value");
+    renderMedia();
+  });
 });
 
-document.getElementById("imdbFetchBtn")?.addEventListener("click",handleImdbFetch);
-document.getElementById("imdbLink")?.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();handleImdbFetch();}});
-document.getElementById("clearPosterPreview")?.addEventListener("click",()=>{clearFetchedPoster();setImdbStatus("Poster removed. You can upload one manually.");});
-document.getElementById("mediaImage")?.addEventListener("change",()=>{if(document.getElementById("mediaImage").files.length){clearFetchedPoster();setImdbStatus("Using uploaded poster.");}});
+mediaSearch.addEventListener("input", () => {
+  currentSearch = mediaSearch.value;
+  mediaSearch.parentElement.classList.toggle("has-value", Boolean(currentSearch));
+  renderMedia();
+});
 
-mediaForm.addEventListener("submit",async event=>{
+clearMediaSearch.addEventListener("click", () => {
+  mediaSearch.value = "";
+  currentSearch = "";
+  mediaSearch.parentElement.classList.remove("has-value");
+  mediaSearch.focus();
+  renderMedia();
+});
+
+mediaSort.addEventListener("change", () => {
+  currentSort = mediaSort.value;
+  renderMedia();
+});
+
+mediaSearch.placeholder = `Search ${getTypeLabel(currentType).toLowerCase()}...`;
+
+addMediaBtn.addEventListener("click", () => openModal());
+closeMediaModal.addEventListener("click", closeModal);
+cancelMedia.addEventListener("click", closeModal);
+
+mediaModal.addEventListener("click", event => {
+  if (event.target === mediaModal) closeModal();
+});
+
+// IMDb auto-fill
+const imdbFetchBtn = document.getElementById("imdbFetchBtn");
+const imdbLinkInput = document.getElementById("imdbLink");
+const clearPosterPreviewBtn = document.getElementById("clearPosterPreview");
+
+imdbFetchBtn?.addEventListener("click", handleImdbFetch);
+
+imdbLinkInput?.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    handleImdbFetch();
+  }
+});
+
+imdbLinkInput?.addEventListener("paste", () => {
+  window.setTimeout(() => {
+    const p = parseMediaLink(imdbLinkInput.value);
+    if (p.type === "imdb" || p.type === "rt" || p.type === "title") {
+      handleImdbFetch();
+    }
+  }, 50);
+});
+
+clearPosterPreviewBtn?.addEventListener("click", () => {
+  clearFetchedPoster();
+  setImdbStatus("Auto poster removed. You can upload one manually.", "");
+});
+
+document.getElementById("mediaImage")?.addEventListener("change", () => {
+  const fileInput = document.getElementById("mediaImage");
+  if (fileInput?.files?.length) {
+    clearFetchedPoster();
+    setImdbStatus("Using uploaded poster instead of IMDb auto poster.", "");
+  }
+});
+
+mediaForm.addEventListener("submit", async event => {
   event.preventDefault();
-  if(!collectionReady){showMediaError("The collection is not ready. Please refresh the page.");return;}
-  try{
-    const id=document.getElementById("mediaId").value.trim(); const type=document.getElementById("mediaType").value; const name=document.getElementById("mediaName").value.trim(); const year=document.getElementById("mediaYear").value; const genre=normalizeGenres(document.getElementById("mediaGenre").value); const parts=document.getElementById("mediaParts").value; const ratingRaw=document.getElementById("mediaRating").value; const rating=ratingRaw===""?"":String(Math.max(0,Math.min(5,Math.round(parseFloat(ratingRaw)*10)/10))); const description=document.getElementById("mediaDescription").value.trim(); const imageFile=document.getElementById("mediaImage").files[0];
-    if(!name)throw new Error(`${getTypeLabel(type)} name is required.`); if(!["movie","anime","webseries"].includes(type))throw new Error("Invalid collection type.");
-    const existing=id?mediaItems.find(x=>x.id===id):null; if(id&&!existing)throw new Error("The item no longer exists.");
-    const itemId=id || (crypto.randomUUID?crypto.randomUUID():`media-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    let image_path=existing?.image_path||"";
-    if(imageFile){const blob=await resizeImage(imageFile);image_path=await uploadPoster(itemId,blob);} else if(fetchedPosterUrl){try{image_path=await uploadPoster(itemId,fetchedPosterUrl);}catch(e){console.warn("[Poster] Could not save fetched poster:",e);}}
-    const payload={id:itemId,type,name,year,genre,parts,rating,description,image_path};
-    const {data,error}=id?await supabaseClient.from("media_items").update(payload).eq("id",id).select("*").single():await supabaseClient.from("media_items").insert(payload).select("*").single();
-    if(error)throw error;
-    if(id&&existing?.image_path&&image_path&&existing.image_path!==image_path)await supabaseClient.storage.from("media-posters").remove([existing.image_path]);
-    const normalized={...data,imageKey:data.image_path||"",addedAt:Date.parse(data.added_at)||Date.now()};
-    mediaItems=id?mediaItems.map(x=>x.id===id?normalized:x):[normalized,...mediaItems];
-    closeModal();await renderMedia();
-  }catch(error){console.error("[Collection] Save failed:",error);showMediaError("The item could not be saved. Make sure you are signed in as the configured admin.",error);}
+
+  if (!collectionReady) {
+    showMediaError("The collection database is not ready. Please refresh the page and try again.");
+    return;
+  }
+
+  try {
+    const id = document.getElementById("mediaId").value.trim();
+    const type = document.getElementById("mediaType").value;
+    const name = document.getElementById("mediaName").value.trim();
+    const year = document.getElementById("mediaYear").value;
+    const genre = normalizeGenres(document.getElementById("mediaGenre").value);
+    const parts = document.getElementById("mediaParts").value;
+    const ratingRaw = document.getElementById("mediaRating").value;
+    let rating = "";
+    if (ratingRaw !== "" && ratingRaw !== null) {
+      const rn = parseFloat(ratingRaw);
+      if (Number.isFinite(rn)) {
+        rating = String(Math.max(0, Math.min(5, Math.round(rn * 10) / 10)));
+      }
+    }
+    const description = document.getElementById("mediaDescription").value.trim();
+    const imageFile = document.getElementById("mediaImage").files[0];
+
+    if (!name) {
+      showMediaError(`${getTypeLabel(type)} name is required.`);
+      document.getElementById("mediaName").focus();
+      return;
+    }
+
+    if (!["movie", "anime", "webseries"].includes(type)) {
+      throw new Error(`Invalid collection type: ${type || "empty"}`);
+    }
+
+    const existing = id ? mediaItems.find(x => x.id === id) : null;
+    if (id && !existing) {
+      throw new Error("The item you are trying to edit no longer exists.");
+    }
+
+    const itemId = id || (
+      crypto.randomUUID
+        ? crypto.randomUUID()
+        : `media-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    );
+
+    let imageKey = existing?.imageKey || "";
+
+    if (imageFile) {
+      const imageBlob = await resizeImage(imageFile);
+      await dbPutImage(itemId, imageBlob);
+      imageKey = itemId;
+    } else if (fetchedPosterBlob) {
+      await dbPutImage(itemId, fetchedPosterBlob);
+      imageKey = itemId;
+    }
+
+    const item = {
+      id: itemId,
+      type,
+      name,
+      year,
+      genre,
+      parts,
+      rating,
+      description,
+      imageKey,
+      addedAt: existing ? getMediaAddedAt(existing) : Date.now()
+    };
+
+    await dbPutItem(item);
+
+    if (id) {
+      mediaItems = mediaItems.map(x => x.id === id ? item : x);
+    } else {
+      mediaItems = [...mediaItems, item];
+    }
+
+    closeModal();
+    await renderMedia();
+  } catch (error) {
+    console.error("[Collection] Save failed:", error);
+    showMediaError(
+      `The ${getTypeLabel(document.getElementById("mediaType").value).toLowerCase()} could not be saved.`,
+      error
+    );
+  }
 });
 
-async function initCollection(){try{await loadMedia();await renderMedia();}catch(error){collectionReady=false;console.error("[Collection] Initialization failed:",error);emptyMedia.style.display="block";emptyMedia.querySelector("h3").textContent="Collection unavailable";emptyMedia.querySelector("p").textContent="Check Supabase configuration and run the supplied SQL schema.";}}
-initCollection();
+function resizeImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve(null);
+      return;
+    }
 
+    if (!file.type.startsWith("image/")) {
+      reject(new Error("The selected poster is not an image file."));
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = event => {
+      const img = new Image();
+
+      img.onload = () => {
+        try {
+          // Keep posters reasonably sized while storing the actual binary
+          // image in IndexedDB instead of Base64 in localStorage.
+          const max = 900;
+          const scale = Math.min(1, max / Math.max(img.width, img.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("Your browser could not create an image canvas."));
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+          canvas.toBlob(
+            blob => {
+              if (!blob) {
+                reject(new Error("The poster could not be converted to a storable image."));
+                return;
+              }
+              resolve(blob);
+            },
+            "image/jpeg",
+            0.78
+          );
+        } catch (error) {
+          reject(error);
+        }
+      };
+
+      img.onerror = () => reject(new Error("The poster image could not be decoded."));
+      img.src = event.target.result;
+    };
+
+    reader.onerror = () => reject(new Error("The browser could not read the poster file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function initCollection() {
+  try {
+    await loadMedia();
+    await renderMedia();
+  } catch (error) {
+    console.error("[Collection] Initialization failed:", error);
+    showMediaError("The collection could not be initialized.", error);
+  }
+}
+
+initCollection();
 /* ——— Custom Cursor + Trail (Superhero) ——— */
 (function initCursor() {
   if (!window.matchMedia("(pointer: fine)").matches) return;

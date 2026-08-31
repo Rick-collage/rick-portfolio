@@ -7,8 +7,6 @@
   <title>Rick | B.Tech Student Portfolio</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="supabase-config.js"></script>
 </head>
 <body>
   <header class="navbar">
@@ -61,7 +59,7 @@
         </div>
 
         <div class="hero-panel-bottom">
-          <span>SCROLL TO DISCOVER</span><i></i><span>INDIA · <span id="heroYear">2026</span></span>
+          <span>SCROLL TO DISCOVER</span><i></i><span>INDIA · 2026</span>
         </div>
       </div>
 
@@ -169,7 +167,7 @@
           <button class="media-tab" data-type="anime">Anime</button>
           <button class="media-tab" data-type="webseries">Web Series</button>
         </div>
-        <div class="media-admin-actions"><button class="btn secondary admin-login-btn" id="adminLoginBtn" type="button">Admin Login</button><button class="btn primary add-media-btn" id="addMediaBtn">+ Add New</button><button class="btn secondary admin-logout-btn" id="adminLogoutBtn" type="button" hidden>Logout</button></div>
+        <button class="btn primary add-media-btn" id="addMediaBtn">+ Add New</button>
       </div>
 
       <div class="media-controls">
@@ -195,30 +193,6 @@
         <div>◇</div>
         <h3>No favorites yet</h3>
         <p>Click <strong>Add New</strong> to add your first movie, anime, or series.</p>
-      </div>
-
-      <nav id="mediaPagination" class="media-pagination" aria-label="Collection pages" hidden></nav>
-
-      <div id="adminLoginModal" class="admin-login-modal" aria-hidden="true">
-        <div class="admin-login-card" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle">
-          <button class="modal-close" id="closeAdminLogin" type="button" aria-label="Close">×</button>
-          <div class="admin-login-icon" aria-hidden="true">⌁</div>
-          <p class="eyebrow">Private Area</p>
-          <h3 id="adminLoginTitle">Admin Login</h3>
-          <p class="admin-login-subtitle">Sign in with your Supabase admin account to manage the collection.</p>
-          <form id="adminLoginForm" novalidate>
-            <label for="adminEmail">Email</label>
-            <input id="adminEmail" name="email" type="email" autocomplete="username" placeholder="you@example.com" required>
-            <label for="adminPassword">Password</label>
-            <div class="admin-password-wrap">
-              <input id="adminPassword" name="password" type="password" autocomplete="current-password" placeholder="Your password" required minlength="6">
-              <button id="toggleAdminPassword" class="password-toggle" type="button" aria-label="Show password" title="Show password">Show</button>
-            </div>
-            <div id="adminLoginStatus" class="admin-login-status" aria-live="polite"></div>
-            <button id="adminLoginSubmit" class="btn primary admin-login-submit" type="submit">Sign In</button>
-          </form>
-          <p class="admin-login-note">Your password is sent directly to Supabase Auth and is never stored in this website's JavaScript.</p>
-        </div>
       </div>
 
       <div id="mediaModal" class="media-modal" aria-hidden="true">
@@ -257,7 +231,7 @@
 
             <label for="mediaImage">Poster</label>
             <input id="mediaImage" type="file" accept="image/*">
-            <div class="image-help">Poster is stored in the shared Supabase media-posters bucket. Auto-fill uses the optional secure Supabase Edge Function.</div>
+            <div class="image-help">Poster is stored locally in this browser using IndexedDB. Auto-fetched from IMDb when available.</div>
             <div id="posterPreview" class="poster-preview" hidden>
               <img id="posterPreviewImg" alt="Poster preview">
               <button type="button" class="poster-preview-clear" id="clearPosterPreview" title="Remove auto poster">×</button>
@@ -283,7 +257,8 @@
       <div class="contact-box">
         <p>Interested in technology, projects, gaming, or just saying hello? Reach out.</p>
         <div class="contact-buttons">
-           <a class="btn secondary" href="https://steamcommunity.com/id/I_like_banana/" target="_blank" rel="noopener noreferrer">Steam</a>
+          <a class="btn primary" href="mailto:your-email@example.com">Email</a>
+          <a class="btn secondary" href="https://steamcommunity.com/id/I_like_banana/" target="_blank" rel="noopener noreferrer">Steam</a>
         </div>
       </div>
     </section>
