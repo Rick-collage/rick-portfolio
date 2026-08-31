@@ -23,6 +23,7 @@ const mediaTabs = document.querySelectorAll(".media-tab");
 const mediaSearch = document.getElementById("mediaSearch");
 const clearMediaSearch = document.getElementById("clearMediaSearch");
 const mediaSort = document.getElementById("mediaSort");
+const mediaPagination = document.getElementById("mediaPagination");
 
 /* ===== Shared Supabase collection ===== */
 const SUPABASE_URL = window.SUPABASE_CONFIG?.url || "";
@@ -34,6 +35,9 @@ const supabaseClient = (window.supabase && SUPABASE_URL && SUPABASE_KEY)
 let currentType = "movie";
 let currentSearch = "";
 let currentSort = "recent";
+let currentPage = 1;
+const MEDIA_PAGE_SIZE = 12;
+const PAGINATED_TYPES = new Set(["movie", "anime", "webseries"]);
 let mediaItems = [];
 let collectionReady = false;
 let imageObjectUrls = new Set();
@@ -207,34 +211,138 @@ function getSearchText(item) { return [item.name,item.genre,item.year,item.parts
 
 function revokeImageUrls() { imageObjectUrls.forEach(url => URL.revokeObjectURL(url)); imageObjectUrls.clear(); }
 
+function getPaginationItems(totalPages, page) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+
+  const items = [1];
+  const start = Math.max(2, page - 1);
+  const end = Math.min(totalPages - 1, page + 1);
+
+  if (start > 2) items.push("ellipsis-left");
+  for (let n = start; n <= end; n++) items.push(n);
+  if (end < totalPages - 1) items.push("ellipsis-right");
+  items.push(totalPages);
+  return items;
+}
+
+function renderMediaPagination(totalItems) {
+  if (!mediaPagination) return;
+  const enabled = PAGINATED_TYPES.has(currentType);
+  const totalPages = Math.max(1, Math.ceil(totalItems / MEDIA_PAGE_SIZE));
+
+  if (!enabled || totalItems <= MEDIA_PAGE_SIZE) {
+    mediaPagination.hidden = true;
+    mediaPagination.innerHTML = "";
+    return;
+  }
+
+  currentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const button = (label, page, className = "", disabled = false, aria = label) =>
+    `<button type="button" class="page-btn ${className}" data-page="${page}" ${disabled ? "disabled" : ""} aria-label="${escapeHtml(aria)}" ${page === currentPage ? 'aria-current="page"' : ""}>${label}</button>`;
+
+  let html = button("«", 1, "page-first", currentPage === 1, "First page");
+  html += button("‹", currentPage - 1, "page-prev", currentPage === 1, "Previous page");
+
+  for (const item of getPaginationItems(totalPages, currentPage)) {
+    if (typeof item === "string") {
+      html += `<span class="page-ellipsis" aria-hidden="true">…</span>`;
+    } else {
+      html += button(String(item), item, item === currentPage ? "active" : "", false, `Page ${item}`);
+    }
+  }
+
+  html += button("›", currentPage + 1, "page-next", currentPage === totalPages, "Next page");
+  html += button("»", totalPages, "page-last", currentPage === totalPages, "Last page");
+
+  mediaPagination.innerHTML = html;
+  mediaPagination.hidden = false;
+  mediaPagination.querySelectorAll(".page-btn:not(:disabled)").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const page = Number(btn.dataset.page);
+      if (!Number.isFinite(page) || page === currentPage) return;
+      currentPage = page;
+      renderMedia();
+      const section = document.getElementById("movies");
+      if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
 async function renderMedia() {
   revokeImageUrls();
   mediaGrid.innerHTML = "";
-  if (!collectionReady) { emptyMedia.style.display="block"; return; }
+
+  if (!collectionReady) {
+    emptyMedia.style.display = "block";
+    emptyMedia.querySelector("h3").textContent = "Collection unavailable";
+    emptyMedia.querySelector("p").textContent = "Refresh the page and try again.";
+    if (mediaPagination) mediaPagination.hidden = true;
+    return;
+  }
+
   const typeItems = mediaItems.filter(item => item.type === currentType);
   const query = currentSearch.trim().toLocaleLowerCase();
-  const filtered = sortMediaItems(query ? typeItems.filter(item=>getSearchText(item).includes(query)) : typeItems);
-  emptyMedia.style.display = filtered.length ? "none" : "block";
-  emptyMedia.querySelector("h3").textContent = filtered.length ? "" : (query ? "No results found" : "No favorites yet");
-  emptyMedia.querySelector("p").textContent = filtered.length ? "" : (query ? `Nothing matches “${currentSearch.trim()}”. Try another search.` : "Click Add New to add your first movie, anime, or series.");
+  const searched = query
+    ? typeItems.filter(item => getSearchText(item).includes(query))
+    : typeItems;
+  const filtered = sortMediaItems(searched);
 
-  for (const item of filtered) {
-    const card=document.createElement("article"); card.className="media-card";
-    const posterWrap=document.createElement("div"); posterWrap.className="poster-wrap";
-    const posterUrl=imagePublicUrl(item.image_path || item.imageKey);
-    if(posterUrl){ const img=document.createElement("img"); img.alt=`${item.name} poster`; img.loading="lazy"; img.src=posterUrl; posterWrap.appendChild(img); }
-    else posterWrap.innerHTML=`<div class="poster-placeholder">${item.type==="movie"?"🎬":item.type==="anime"?"🍿":"📺"}</div>`;
-    const actions=document.createElement("div"); actions.className="media-actions";
-    actions.innerHTML=`<button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit ${escapeHtml(item.name)}">✎</button><button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete" aria-label="Delete ${escapeHtml(item.name)}">🗑</button>`;
-    posterWrap.appendChild(actions); card.appendChild(posterWrap);
-    const info=document.createElement("div"); info.className="media-info";
-    const yearBit=escapeHtml(item.year||"");
-    const partsBit=item.parts ? `${escapeHtml(item.parts)} ${item.type==="movie"?(Number(item.parts)===1?"Part":"Parts"):(Number(item.parts)===1?"Season":"Seasons")}` : "";
-    info.innerHTML=`<h3>${escapeHtml(item.name)}</h3><p class="media-meta">${[yearBit,partsBit].filter(Boolean).join(" • ")}</p>${genreTagsHtml(item.genre)}${item.rating?`<div class="rating">${stars(item.rating)}</div>`:""}${item.description?`<p class="media-description">${escapeHtml(item.description)}</p>`:""}`;
-    card.appendChild(info); mediaGrid.appendChild(card);
+  emptyMedia.style.display = filtered.length ? "none" : "block";
+
+  if (!filtered.length && query) {
+    emptyMedia.querySelector("h3").textContent = "No results found";
+    emptyMedia.querySelector("p").textContent = `Nothing matches “${currentSearch.trim()}”. Try another search.`;
+  } else if (!filtered.length) {
+    emptyMedia.querySelector("h3").textContent = "No favorites yet";
+    emptyMedia.querySelector("p").innerHTML =
+      'Click <strong>Add New</strong> to add your first movie, anime, or series.';
   }
-  document.querySelectorAll(".edit-btn").forEach(btn=>btn.addEventListener("click",()=>openModal(btn.dataset.id)));
-  document.querySelectorAll(".delete-btn").forEach(btn=>btn.addEventListener("click",()=>deleteMedia(btn.dataset.id)));
+
+  if (!filtered.length) {
+    renderMediaPagination(0);
+    return;
+  }
+
+  const shouldPaginate = PAGINATED_TYPES.has(currentType);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / MEDIA_PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  const start = shouldPaginate ? (currentPage - 1) * MEDIA_PAGE_SIZE : 0;
+  const visibleItems = shouldPaginate ? filtered.slice(start, start + MEDIA_PAGE_SIZE) : filtered;
+
+  for (const item of visibleItems) {
+    const card = document.createElement("article");
+    card.className = "media-card";
+    const posterWrap = document.createElement("div");
+    posterWrap.className = "poster-wrap";
+    const posterUrl = imagePublicUrl(item.image_path || item.imageKey);
+    if (posterUrl) {
+      const img = document.createElement("img");
+      img.alt = `${item.name} poster`;
+      img.loading = "lazy";
+      img.src = posterUrl;
+      posterWrap.appendChild(img);
+    } else {
+      posterWrap.innerHTML = `<div class="poster-placeholder">${item.type === "movie" ? "🎬" : item.type === "anime" ? "🍿" : "📺"}</div>`;
+    }
+    const actions = document.createElement("div");
+    actions.className = "media-actions";
+    actions.innerHTML = `<button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit ${escapeHtml(item.name)}">✎</button><button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete" aria-label="Delete ${escapeHtml(item.name)}">🗑</button>`;
+    posterWrap.appendChild(actions);
+    card.appendChild(posterWrap);
+
+    const info = document.createElement("div");
+    info.className = "media-info";
+    const yearBit = escapeHtml(item.year || "");
+    const partsBit = item.parts ? `${escapeHtml(item.parts)} ${item.type === "movie" ? (Number(item.parts) === 1 ? "Part" : "Parts") : (Number(item.parts) === 1 ? "Season" : "Seasons")}` : "";
+    info.innerHTML = `<h3>${escapeHtml(item.name)}</h3><p class="media-meta">${[yearBit, partsBit].filter(Boolean).join(" • ")}</p>${genreTagsHtml(item.genre)}${item.rating ? `<div class="rating">${stars(item.rating)}</div>` : ""}${item.description ? `<p class="media-description">${escapeHtml(item.description)}</p>` : ""}`;
+    card.appendChild(info);
+    mediaGrid.appendChild(card);
+  }
+
+  renderMediaPagination(filtered.length);
+
+  document.querySelectorAll(".edit-btn").forEach(btn => btn.addEventListener("click", () => openModal(btn.dataset.id)));
+  document.querySelectorAll(".delete-btn").forEach(btn => btn.addEventListener("click", () => deleteMedia(btn.dataset.id)));
 }
 
 async function uploadPoster(itemId, fileOrUrl) {
@@ -276,10 +384,10 @@ async function deleteMedia(id){
   }catch(error){console.error("[Collection] Delete failed:",error);showMediaError("Could not delete this item.",error);}
 }
 
-mediaTabs.forEach(tab=>tab.addEventListener("click",()=>{mediaTabs.forEach(t=>t.classList.remove("active"));tab.classList.add("active");currentType=tab.dataset.type;currentSearch="";mediaSearch.value="";mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;mediaSearch.parentElement.classList.remove("has-value");renderMedia();}));
-mediaSearch.addEventListener("input",()=>{currentSearch=mediaSearch.value;mediaSearch.parentElement.classList.toggle("has-value",Boolean(currentSearch));renderMedia();});
-clearMediaSearch.addEventListener("click",()=>{mediaSearch.value="";currentSearch="";mediaSearch.parentElement.classList.remove("has-value");mediaSearch.focus();renderMedia();});
-mediaSort.addEventListener("change",()=>{currentSort=mediaSort.value;renderMedia();});
+mediaTabs.forEach(tab=>tab.addEventListener("click",()=>{mediaTabs.forEach(t=>t.classList.remove("active"));tab.classList.add("active");currentType=tab.dataset.type;currentPage=1;currentSearch="";mediaSearch.value="";mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;mediaSearch.parentElement.classList.remove("has-value");renderMedia();}));
+mediaSearch.addEventListener("input",()=>{currentPage=1;currentSearch=mediaSearch.value;mediaSearch.parentElement.classList.toggle("has-value",Boolean(currentSearch));renderMedia();});
+clearMediaSearch.addEventListener("click",()=>{currentPage=1;mediaSearch.value="";currentSearch="";mediaSearch.parentElement.classList.remove("has-value");mediaSearch.focus();renderMedia();});
+mediaSort.addEventListener("change",()=>{currentPage=1;currentSort=mediaSort.value;renderMedia();});
 mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;
 addMediaBtn.addEventListener("click",()=>openModal()); closeMediaModal.addEventListener("click",closeModal); cancelMedia.addEventListener("click",closeModal); mediaModal.addEventListener("click",e=>{if(e.target===mediaModal)closeModal();});
 
