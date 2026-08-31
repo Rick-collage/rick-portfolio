@@ -24,6 +24,16 @@ const mediaSearch = document.getElementById("mediaSearch");
 const clearMediaSearch = document.getElementById("clearMediaSearch");
 const mediaSort = document.getElementById("mediaSort");
 const mediaPagination = document.getElementById("mediaPagination");
+const adminLoginModal = document.getElementById("adminLoginModal");
+const adminLoginForm = document.getElementById("adminLoginForm");
+const adminEmail = document.getElementById("adminEmail");
+const adminPassword = document.getElementById("adminPassword");
+const adminLoginStatus = document.getElementById("adminLoginStatus");
+const adminLoginSubmit = document.getElementById("adminLoginSubmit");
+const adminLoginBtn = document.getElementById("adminLoginBtn");
+const adminLogoutBtn = document.getElementById("adminLogoutBtn");
+const closeAdminLogin = document.getElementById("closeAdminLogin");
+const toggleAdminPassword = document.getElementById("toggleAdminPassword");
 
 /* ===== Shared Supabase collection ===== */
 const SUPABASE_URL = window.SUPABASE_CONFIG?.url || "";
@@ -165,18 +175,114 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]));
 }
 
-async function requireAdmin() {
-  if (!supabaseClient) { showMediaError("Supabase is not configured. Add your Supabase URL and publishable key first."); return false; }
-  const { data: { session } } = await supabaseClient.auth.getSession();
-  if (session) return true;
-  const email = prompt("Admin email:");
-  if (!email) return false;
-  const password = prompt("Admin password:");
-  if (!password) return false;
-  const { error } = await supabaseClient.auth.signInWithPassword({ email: email.trim(), password });
-  if (error) { showMediaError("Admin sign-in failed. Make sure the account exists in Supabase Auth and your SQL admin policy allows it.", error); return false; }
-  return true;
+let adminLoginResolver = null;
+
+function setAdminLoginStatus(message, state = "") {
+  if (!adminLoginStatus) return;
+  adminLoginStatus.textContent = message || "";
+  adminLoginStatus.className = "admin-login-status" + (state ? ` is-${state}` : "");
 }
+
+function updateAdminUI(session) {
+  const signedIn = !!session;
+  if (adminLoginBtn) adminLoginBtn.hidden = signedIn;
+  if (adminLogoutBtn) adminLogoutBtn.hidden = !signedIn;
+  if (adminLoginBtn) adminLoginBtn.setAttribute("aria-label", signedIn ? "Signed in as admin" : "Open admin login");
+}
+
+function openAdminLogin() {
+  if (!adminLoginModal) return Promise.resolve(false);
+  setAdminLoginStatus("");
+  if (adminEmail) adminEmail.value = "";
+  if (adminPassword) adminPassword.value = "";
+  adminLoginModal.classList.add("show");
+  adminLoginModal.setAttribute("aria-hidden", "false");
+  window.setTimeout(() => adminEmail?.focus(), 40);
+  return new Promise(resolve => { adminLoginResolver = resolve; });
+}
+
+function closeAdminLoginModal(result = false) {
+  if (!adminLoginModal) return;
+  adminLoginModal.classList.remove("show");
+  adminLoginModal.setAttribute("aria-hidden", "true");
+  adminLoginForm?.reset();
+  if (adminLoginResolver) {
+    const resolve = adminLoginResolver;
+    adminLoginResolver = null;
+    resolve(result);
+  }
+}
+
+async function requireAdmin() {
+  if (!supabaseClient) {
+    showMediaError("Supabase is not configured. Add your Supabase URL and publishable key first.");
+    return false;
+  }
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  updateAdminUI(session);
+  if (session) return true;
+  return openAdminLogin();
+}
+
+if (supabaseClient) {
+  supabaseClient.auth.onAuthStateChange((_event, session) => updateAdminUI(session));
+}
+
+adminLoginBtn?.addEventListener("click", () => openAdminLogin());
+closeAdminLogin?.addEventListener("click", () => closeAdminLoginModal(false));
+adminLoginModal?.addEventListener("click", event => {
+  if (event.target === adminLoginModal) closeAdminLoginModal(false);
+});
+
+toggleAdminPassword?.addEventListener("click", () => {
+  if (!adminPassword) return;
+  const showing = adminPassword.type === "text";
+  adminPassword.type = showing ? "password" : "text";
+  toggleAdminPassword.textContent = showing ? "Show" : "Hide";
+  toggleAdminPassword.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+  toggleAdminPassword.title = showing ? "Show password" : "Hide password";
+});
+
+adminLoginForm?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!supabaseClient) {
+    setAdminLoginStatus("Supabase is not configured.", "error");
+    return;
+  }
+  const email = adminEmail?.value.trim() || "";
+  const password = adminPassword?.value || "";
+  if (!email || !adminPassword?.checkValidity()) {
+    setAdminLoginStatus("Enter a valid email and password.", "error");
+    return;
+  }
+  adminLoginSubmit.disabled = true;
+  setAdminLoginStatus("Signing in…", "loading");
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    updateAdminUI(data.session);
+    setAdminLoginStatus("Signed in successfully.", "success");
+    window.setTimeout(() => closeAdminLoginModal(true), 250);
+  } catch (error) {
+    console.error("[Admin] Sign-in failed:", error);
+    setAdminLoginStatus("Sign-in failed. Check your Supabase Auth email and password.", "error");
+  } finally {
+    adminLoginSubmit.disabled = false;
+  }
+});
+
+(async () => {
+  if (!supabaseClient) return;
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  updateAdminUI(session);
+})();
+
+adminLogoutBtn?.addEventListener("click", async () => {
+  if (!supabaseClient) return;
+  const { error } = await supabaseClient.auth.signOut();
+  if (error) showMediaError("Could not sign out.", error);
+  else updateAdminUI(null);
+});
 
 function imagePublicUrl(path) {
   if (!path || !supabaseClient) return "";
@@ -390,6 +496,11 @@ clearMediaSearch.addEventListener("click",()=>{currentPage=1;mediaSearch.value="
 mediaSort.addEventListener("change",()=>{currentPage=1;currentSort=mediaSort.value;renderMedia();});
 mediaSearch.placeholder=`Search ${getTypeLabel(currentType).toLowerCase()}...`;
 addMediaBtn.addEventListener("click",()=>openModal()); closeMediaModal.addEventListener("click",closeModal); cancelMedia.addEventListener("click",closeModal); mediaModal.addEventListener("click",e=>{if(e.target===mediaModal)closeModal();});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (adminLoginModal?.classList.contains("show")) closeAdminLoginModal(false);
+  else if (mediaModal?.classList.contains("show")) closeModal();
+});
 
 document.getElementById("imdbFetchBtn")?.addEventListener("click",handleImdbFetch);
 document.getElementById("imdbLink")?.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();handleImdbFetch();}});
