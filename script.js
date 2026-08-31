@@ -124,12 +124,30 @@ async function handleImdbFetch() {
   if (!input || !btn) return;
   const parsed = parseMediaLink(input.value);
   if (parsed.type === "empty") { setImdbStatus("Paste an IMDb or Rotten Tomatoes link, or a title.", "error"); return; }
+  if (parsed.type === "unknown") { setImdbStatus("Use an IMDb link, Rotten Tomatoes link, IMDb ID (tt1234567), or a title.", "error"); return; }
   if (!supabaseClient) { setImdbStatus("Supabase is not configured. You can still add entries manually.", "error"); return; }
+
+  // The lookup function is protected. Make sure the admin is signed in so
+  // the user's Supabase Auth token is attached to the function request.
+  if (!(await requireAdmin())) {
+    setImdbStatus("Sign in as admin to use auto-fill.", "error");
+    return;
+  }
+
   btn.disabled = true;
   try {
     setImdbStatus("Looking up media…", "loading");
     const { data, error } = await supabaseClient.functions.invoke("media-lookup", { body: parsed });
-    if (error) throw error;
+    if (error) {
+      let detail = error.message || "Function request failed.";
+      try {
+        if (error.context && typeof error.context.json === "function") {
+          const body = await error.context.json();
+          if (body?.error) detail = body.error;
+        }
+      } catch (_) {}
+      throw new Error(detail);
+    }
     if (!data?.title) throw new Error("No media match was returned.");
     document.getElementById("mediaName").value = data.title || "";
     document.getElementById("mediaYear").value = data.year || "";
@@ -141,7 +159,7 @@ async function handleImdbFetch() {
     setImdbStatus(`Filled: ${data.title}${data.posterUrl ? " · poster ready" : ""}`, "success");
   } catch (error) {
     console.error("[Media link] Fetch failed:", error);
-    setImdbStatus("Auto-fill is unavailable. Add the details manually or deploy the media-lookup Edge Function.", "error");
+    setImdbStatus(`Auto-fill failed: ${error?.message || "Unknown error"}`, "error");
   } finally { btn.disabled = false; }
 }
 

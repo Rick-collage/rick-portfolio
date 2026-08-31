@@ -14,15 +14,13 @@
 3. `supabase-config.js` already contains the browser-safe project URL/publishable key from the supplied project. Do not replace it with a service-role key.
 4. The public site can read the collection. Add/Edit/Delete requires the configured admin account.
 
-## Secure IMDb/Rotten Tomatoes auto-fill (optional)
-The browser no longer contains an OMDb API key. The Fetch button calls `supabase/functions/media-lookup/index.ts`.
+## Secure IMDb/Rotten Tomatoes auto-fill
+The browser no longer contains an OMDb API key. The Fetch button calls the protected `supabase/functions/media-lookup/index.ts` function and requires a signed-in Supabase user.
 
-Deploy that function with the Supabase CLI and set the secret:
-`supabase secrets set OMDB_API_KEY=YOUR_OMDB_KEY`
-Then deploy:
-`supabase functions deploy media-lookup`
+See `DEPLOY-MEDIA-LOOKUP.md` for the exact Dashboard and CLI steps. The required server secret is:
+`OMDB_API_KEY=YOUR_OMDB_KEY`
 
-If you do not deploy the function, the collection still works normally; enter media details and upload posters manually.
+The website now shows the real function error instead of the generic “auto-fill unavailable” message, making setup problems easier to diagnose.
 
 ## Important
 The ZIP intentionally does not contain any OMDb secret. If an old OMDb key was ever published, rotate it at OMDb.
