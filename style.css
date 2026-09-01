@@ -910,6 +910,102 @@ footer {
   font-size: 0.9rem;
 }
 
+/* Pagination for Movies / Anime / Web Series */
+.media-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 32px;
+  padding: 16px 12px;
+}
+
+.media-pagination[hidden] {
+  display: none !important;
+}
+
+.page-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 10px 18px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.page-btn:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--panel-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(139, 92, 246, 0.15);
+}
+
+.page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.page-info {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  min-width: 110px;
+  text-align: center;
+}
+
+.page-numbers {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.page-num {
+  min-width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.page-num:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.page-num.active {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
+
+.section.alt .page-btn,
+.section.alt .page-num {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.section.alt .page-btn:hover:not(:disabled),
+.section.alt .page-num:hover {
+  border-color: rgba(192, 132, 252, 0.45);
+}
+
 /* Modal */
 .media-modal {
   position: fixed;

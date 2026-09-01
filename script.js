@@ -30,6 +30,14 @@ let currentSort = "recent";
 let mediaItems = [];
 let collectionReady = false;
 let imageObjectUrls = new Set();
+let currentPage = 1;
+const ITEMS_PER_PAGE = 8;
+
+const mediaPagination = document.getElementById("mediaPagination");
+const prevPageBtn = document.getElementById("prevPageBtn");
+const nextPageBtn = document.getElementById("nextPageBtn");
+const pageInfo = document.getElementById("pageInfo");
+const pageNumbers = document.getElementById("pageNumbers");
 
 const DB_NAME = "rickPortfolioDB";
 const DB_VERSION = 1;
@@ -771,9 +779,17 @@ async function renderMedia() {
     : typeItems;
   const filtered = sortMediaItems(searched);
 
-  emptyMedia.style.display = filtered.length ? "none" : "block";
+  const totalItems = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  if (currentPage < 1) currentPage = 1;
 
-  if (!filtered.length && query) {
+  const start = (currentPage - 1) * ITEMS_PER_PAGE;
+  const pageItems = filtered.slice(start, start + ITEMS_PER_PAGE);
+
+  emptyMedia.style.display = totalItems ? "none" : "block";
+
+  if (!totalItems && query) {
     emptyMedia.querySelector("h3").textContent = "No results found";
     emptyMedia.querySelector("p").textContent = `Nothing matches “${currentSearch.trim()}”. Try another search.`;
   } else {
@@ -782,7 +798,9 @@ async function renderMedia() {
       'Click <strong>Add New</strong> to add your first movie, anime, or series.';
   }
 
-  for (const item of filtered) {
+  updatePagination(totalItems, totalPages);
+
+  for (const item of pageItems) {
     const card = document.createElement("article");
     card.className = "media-card";
 
@@ -858,6 +876,61 @@ async function renderMedia() {
   });
 }
 
+function updatePagination(totalItems, totalPages) {
+  if (!mediaPagination) return;
+
+  if (totalItems <= ITEMS_PER_PAGE) {
+    mediaPagination.hidden = true;
+    return;
+  }
+
+  mediaPagination.hidden = false;
+
+  if (pageInfo) {
+    pageInfo.textContent = `Page ${currentPage} of ${totalPages}`;
+  }
+
+  if (prevPageBtn) {
+    prevPageBtn.disabled = currentPage <= 1;
+  }
+  if (nextPageBtn) {
+    nextPageBtn.disabled = currentPage >= totalPages;
+  }
+
+  if (pageNumbers) {
+    pageNumbers.innerHTML = "";
+    const maxButtons = 7;
+    let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
+    let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+    if (endPage - startPage + 1 < maxButtons) {
+      startPage = Math.max(1, endPage - maxButtons + 1);
+    }
+
+    for (let p = startPage; p <= endPage; p++) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "page-num" + (p === currentPage ? " active" : "");
+      btn.textContent = String(p);
+      btn.setAttribute("aria-label", `Go to page ${p}`);
+      if (p === currentPage) btn.setAttribute("aria-current", "page");
+      btn.addEventListener("click", () => {
+        if (p !== currentPage) {
+          currentPage = p;
+          renderMedia();
+          mediaGrid?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+      pageNumbers.appendChild(btn);
+    }
+  }
+}
+
+function goToPage(page) {
+  currentPage = page;
+  renderMedia();
+  mediaGrid?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function openModal(id = null) {
   if (!verifyPassword()) return;
 
@@ -920,6 +993,7 @@ mediaTabs.forEach(tab => {
     tab.classList.add("active");
     currentType = tab.dataset.type;
     currentSearch = "";
+    currentPage = 1;
     mediaSearch.value = "";
     mediaSearch.placeholder = `Search ${getTypeLabel(currentType).toLowerCase()}...`;
     mediaSearch.parentElement.classList.remove("has-value");
@@ -929,6 +1003,7 @@ mediaTabs.forEach(tab => {
 
 mediaSearch.addEventListener("input", () => {
   currentSearch = mediaSearch.value;
+  currentPage = 1;
   mediaSearch.parentElement.classList.toggle("has-value", Boolean(currentSearch));
   renderMedia();
 });
@@ -936,6 +1011,7 @@ mediaSearch.addEventListener("input", () => {
 clearMediaSearch.addEventListener("click", () => {
   mediaSearch.value = "";
   currentSearch = "";
+  currentPage = 1;
   mediaSearch.parentElement.classList.remove("has-value");
   mediaSearch.focus();
   renderMedia();
@@ -943,10 +1019,19 @@ clearMediaSearch.addEventListener("click", () => {
 
 mediaSort.addEventListener("change", () => {
   currentSort = mediaSort.value;
+  currentPage = 1;
   renderMedia();
 });
 
 mediaSearch.placeholder = `Search ${getTypeLabel(currentType).toLowerCase()}...`;
+
+prevPageBtn?.addEventListener("click", () => {
+  if (currentPage > 1) goToPage(currentPage - 1);
+});
+
+nextPageBtn?.addEventListener("click", () => {
+  goToPage(currentPage + 1);
+});
 
 addMediaBtn.addEventListener("click", () => openModal());
 closeMediaModal.addEventListener("click", closeModal);
