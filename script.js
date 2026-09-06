@@ -298,27 +298,6 @@ async function anilistRequest(query, variables) {
   return payload?.data;
 }
 
-function parseAnimeSeasonNumberFromTitle(anime) {
-  const text = [anime?.title?.romaji, anime?.title?.english, anime?.title?.native]
-    .filter(Boolean).join(" ");
-  if (!text) return 0;
-
-  const arabic = text.match(/(?:season|s|part)\s*(\d{1,2})\b/i) ||
-    text.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+season\b/i);
-  if (arabic) return Number(arabic[1]) || 0;
-
-  const roman = text.match(/(?:\b|\s)(IV|III|II|I)(?:\b|\s|$)/i);
-  if (roman) {
-    const map = { I: 1, II: 2, III: 3, IV: 4 };
-    return map[String(roman[1]).toUpperCase()] || 0;
-  }
-
-  if (/\b(second|2nd)\s+season\b/i.test(text)) return 2;
-  if (/\b(third|3rd)\s+season\b/i.test(text)) return 3;
-  if (/\b(fourth|4th)\s+season\b/i.test(text)) return 4;
-  return 0;
-}
-
 async function getAniListSeasonNumber(anime, cache = new Map()) {
   if (!anime?.id) return 1;
   if (cache.has(anime.id)) return cache.get(anime.id);
@@ -352,24 +331,51 @@ async function getAniListSeasonNumber(anime, cache = new Map()) {
   };
 
   try {
-    const chainValue = await walk(anime);
-    // Some AniList entries do not expose the full prequel chain. Title-based
-    // numbering (e.g. Overlord II / III / IV) is therefore used as an
-    // additional signal instead of relying on relations alone.
-    const titleValue = parseAnimeSeasonNumberFromTitle(anime);
-    const value = Math.max(chainValue || 1, titleValue || 0);
+    const value = await walk(anime);
     cache.set(anime.id, value);
     return value;
   } catch (_) {
-    const value = parseAnimeSeasonNumberFromTitle(anime) || 1;
+    // Safe fallback: parse explicit "Season N" from the title.
+    const text = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).join(" ");
+    const match = text.match(/(?:season|s)\s*(\d{1,2})\b/i);
+    const value = match ? Number(match[1]) : 1;
     cache.set(anime.id, value);
     return value;
   }
 }
 
+function parseSeasonNumberFromTitle(title) {
+  const text = String(title || '').trim();
+  let m = text.match(/(?:season|s)\s*([0-9]{1,2})\b/i);
+  if (m) return Number(m[1]) || 0;
+
+  // Common sequel naming such as "Overlord II", "Overlord III", "Overlord IV".
+  m = text.match(/(?:^|\s)([IVXLCDM]{1,6})\s*$/i);
+  if (m) {
+    const roman = m[1].toUpperCase();
+    const values = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+    let total = 0, prev = 0;
+    for (let i = roman.length - 1; i >= 0; i--) {
+      const value = values[roman[i]] || 0;
+      total += value < prev ? -value : value;
+      prev = Math.max(prev, value);
+    }
+    if (total >= 2 && total <= 20) return total;
+  }
+
+  return 0;
+}
+
+function animeTitleBase(title) {
+  return normalizeTrackerTitle(String(title || ''))
+    .replace(/\b(?:i{2,10}|iv|vi{0,3}|ix|x)\b$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function findAnimeFromAniList(name) {
   const query = `query ($search: String) {
-    Page(perPage: 12) {
+    Page(perPage: 25) {
       media(search: $search, type: ANIME, format: TV, sort: SEARCH_MATCH) {
         id
         title { romaji english native }
@@ -387,40 +393,59 @@ async function findAnimeFromAniList(name) {
   const candidates = Array.isArray(data?.Page?.media) ? data.Page.media : [];
   if (!candidates.length) throw new Error(`Anime “${name}” was not found`);
 
-  const wanted = String(name).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const wanted = animeTitleBase(name);
   const scored = candidates.map((anime, index) => {
-    const titles = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).map(v => String(v).toLowerCase());
-    const exact = titles.some(t => t === wanted) ? 1000 : 0;
-    const contains = titles.some(t => t.includes(wanted) || wanted.includes(t)) ? 300 : 0;
+    const titles = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).map(v => String(v));
+    const bases = titles.map(animeTitleBase);
+    const exactBase = bases.some(t => t === wanted);
+    const containsBase = bases.some(t => t.includes(wanted) || wanted.includes(t));
+    const explicitSeason = Math.max(0, ...titles.map(parseSeasonNumberFromTitle));
     const year = Number(anime.seasonYear) || 0;
-    return { anime, score: exact + contains + year / 100000 - index / 1000000 };
+    return {
+      anime,
+      score: (exactBase ? 1000 : 0) + (containsBase ? 300 : 0) + explicitSeason * 20 + year / 100000 - index / 1000000,
+      exactBase,
+      containsBase,
+      explicitSeason
+    };
   }).sort((a, b) => b.score - a.score);
 
-  // Prefer the closest title first, then use the sequel chain to select the
-  // latest actual TV season of that title rather than a random search result.
   const seasonCache = new Map();
   const inspected = [];
-  for (const entry of scored.slice(0, 5)) {
-    const seasonNumber = await getAniListSeasonNumber(entry.anime, seasonCache);
-    inspected.push({ ...entry, seasonNumber });
+  // Inspect the closest title matches. Explicit season names (II/III/IV or S2)
+  // are trusted immediately; relation walking is used to catch seasons whose
+  // title does not contain a number, such as a plain "Solo Leveling" result.
+  for (const entry of scored.slice(0, 12)) {
+    if (!entry.exactBase && !entry.containsBase) continue;
+    let relationSeason = 0;
+    if (!entry.explicitSeason) {
+      relationSeason = await getAniListSeasonNumber(entry.anime, seasonCache);
+    }
+    inspected.push({ ...entry, seasonNumber: Math.max(entry.explicitSeason, relationSeason || 0) || 1 });
   }
 
+  if (!inspected.length) {
+    const fallback = scored[0];
+    inspected.push({ ...fallback, seasonNumber: fallback.explicitSeason || 1 });
+  }
+
+  // Highest numbered matching TV season wins. This is what lets a tracked
+  // Season 1 detect an online Season 2/3/4 even when the user has not added it.
   inspected.sort((a, b) => {
     if (b.seasonNumber !== a.seasonNumber) return b.seasonNumber - a.seasonNumber;
     return b.score - a.score;
   });
-  const anime = inspected[0]?.anime || candidates[0];
-  const seasonNumber = inspected[0]?.seasonNumber || 1;
-  const season = anime.season ? String(anime.season).toLowerCase() : "";
-  const seasonYear = Number(anime.seasonYear) || 0;
-  const seasonKey = String(seasonNumber);
+
+  const best = inspected[0];
+  const anime = best.anime;
+  const seasonNumber = best.seasonNumber || 1;
   const next = anime.nextAiringEpisode;
   const nextEpisode = next?.episode ? Number(next.episode) : 0;
   const episodes = Number(anime.episodes) || Math.max(0, nextEpisode - 1);
 
   return {
     sourceId: String(anime.id),
-    currentSeason: seasonKey,
+    currentSeason: String(seasonNumber),
     seasonNumber,
     currentEpisode: episodes,
     episodeTotal: episodes,
@@ -428,7 +453,7 @@ async function findAnimeFromAniList(name) {
     latestEpisodeName: episodes ? `Episode ${episodes}` : "",
     url: anime.siteUrl || "",
     status: anime.status || "",
-    seasonYear
+    seasonYear: Number(anime.seasonYear) || 0
   };
 }
 
@@ -574,36 +599,31 @@ async function checkTrackedItems(silent = false, onlyType = "") {
 
         const latestReleaseNumber = Number(latest.seasonNumber) || Number(latest.currentSeason) || 0;
         const collectionReleaseNumber = getCollectionReleaseNumberForTracker(tracker);
-        // The website collection is the source of truth for what the user
-        // already owns. If an older tracker has no numeric baseline, use the
-        // saved collection count instead of silently establishing a new online
-        // baseline. This makes an existing Overlord S1-S3 entry immediately
-        // detect S4 after a refresh.
-        const oldReleaseNumber = Number(tracker.lastSeasonNumber) || collectionReleaseNumber || 0;
 
-        // Once the user adds the released season/part to the website, the
-        // pending alert is resolved and tracking advances to that release.
-        if (latestReleaseNumber > 0 && collectionReleaseNumber >= latestReleaseNumber) {
-          clearResolvedReleaseNotifications(tracker.mediaId, collectionReleaseNumber, tracker.type);
-          if (latestReleaseNumber > oldReleaseNumber) {
-            tracker.lastSeasonNumber = latestReleaseNumber;
-            tracker.lastSeason = String(latestReleaseNumber);
+        // IMPORTANT: the website collection is the user's baseline. We do not
+        // compare against the last online value, because that could hide a
+        // release when the user has never added the new season to the site.
+        // Example: site has Solo Leveling Season 1, online has Season 2 -> alert.
+        if (latestReleaseNumber > 0 && collectionReleaseNumber > 0) {
+          if (collectionReleaseNumber >= latestReleaseNumber) {
+            clearResolvedReleaseNotifications(tracker.mediaId, collectionReleaseNumber, tracker.type);
+            tracker.lastSeasonNumber = collectionReleaseNumber;
+            tracker.lastSeason = String(collectionReleaseNumber);
             changed++;
-          }
-        } else if (latestReleaseNumber > oldReleaseNumber) {
-          const title = `🔔 ${tracker.name}`;
-          const label = tracker.type === "movie"
-            ? `Part ${latestReleaseNumber} Released!`
-            : `Season ${latestReleaseNumber} Released!`;
-
-          // Keep the alert persistent: do not advance lastSeasonNumber until
-          // the user actually adds that release to the website.
-          if (!hasPendingReleaseNotification(tracker.mediaId, latestReleaseNumber, tracker.type)) {
-            notifyTracker(title, label, latest.url, tracker.type, tracker.mediaId, latestReleaseNumber);
           } else {
-            // On a page refresh/check, remind the user again without creating
-            // duplicate cards in the notification inbox.
-            showDesktopTrackerNotification(title, label, latest.url, tracker.type);
+            const title = `🔔 ${tracker.name}`;
+            const label = tracker.type === "movie"
+              ? `Part ${latestReleaseNumber} Released!`
+              : `Season ${latestReleaseNumber} Released!`;
+
+            // Keep this pending until the user adds the missing release to the
+            // collection. Re-checks may show a desktop reminder but never add
+            // duplicate inbox cards.
+            if (!hasPendingReleaseNotification(tracker.mediaId, latestReleaseNumber, tracker.type)) {
+              notifyTracker(title, label, latest.url, tracker.type, tracker.mediaId, latestReleaseNumber);
+            } else {
+              showDesktopTrackerNotification(title, label, latest.url, tracker.type);
+            }
           }
         }
 
@@ -632,11 +652,10 @@ function renderTrackerLists() {
       return;
     }
     list.innerHTML = items.map(t => {
+      const collectionNumber = getCollectionReleaseNumberForTracker(t);
       const label = type === "movie"
-        ? `${Number(t.lastParts || 0) || 0} part${Number(t.lastParts || 0) === 1 ? "" : "s"} saved`
-        : type === "anime"
-          ? `Season ${Number(t.lastSeasonNumber || t.lastSeason || 0) || "—"}`
-          : `Season ${Number(t.lastSeasonNumber || t.lastSeason || 0) || "—"}`;
+        ? `${collectionNumber || Number(t.lastParts || 0) || 0} part${(collectionNumber || Number(t.lastParts || 0) || 0) === 1 ? "" : "s"} saved`
+        : `Season ${collectionNumber || "—"} saved`;
       return `<div class="tracked-item">
         <div class="tracked-item-main"><span class="tracked-type-badge">${type === "movie" ? "MOVIE" : type === "anime" ? "ANIME" : "SERIES"}</span><div><strong>${escapeHtml(t.name)}</strong><span>${label} · checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div></div>
         <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
