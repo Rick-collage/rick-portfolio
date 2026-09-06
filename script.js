@@ -216,6 +216,7 @@ async function findTvMazeShow(name) {
   return {
     sourceId: String(data.id),
     currentSeason: seasons.length ? Math.max(0, ...seasons.map(s => Number(s.number) || 0)) : 0,
+    seasonNumber: seasons.length ? Math.max(0, ...seasons.map(s => Number(s.number) || 0)) : 0,
     currentEpisode: episodes.length ? Math.max(0, ...episodes.map(e => Number(e.number) || 0)) : 0,
     episodeTotal: episodes.length,
     latestEpisodeName: episodes.length ? episodes[episodes.length - 1].name : "",
@@ -233,33 +234,111 @@ async function fetchWithTimeout(url, options = {}, timeout = 12000) {
   }
 }
 
-async function findAnimeFromAniList(name) {
-  const query = `query ($search: String) {
-    Media(search: $search, type: ANIME) {
-      id
-      title { romaji english native }
-      episodes
-      season
-      seasonYear
-      status
-      nextAiringEpisode { episode airingAt }
-      siteUrl
-    }
-  }`;
-
+async function anilistRequest(query, variables) {
   const res = await fetchWithTimeout("https://graphql.anilist.co", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    body: JSON.stringify({ query, variables: { search: name } })
+    body: JSON.stringify({ query, variables })
   });
   if (!res.ok) throw new Error(`AniList HTTP ${res.status}`);
   const payload = await res.json();
-  const anime = payload?.data?.Media;
-  if (!anime) throw new Error(`Anime “${name}” was not found`);
+  if (payload?.errors?.length) throw new Error(payload.errors[0]?.message || "AniList query failed");
+  return payload?.data;
+}
 
+async function getAniListSeasonNumber(anime, cache = new Map()) {
+  if (!anime?.id) return 1;
+  if (cache.has(anime.id)) return cache.get(anime.id);
+
+  // Most anime seasons are linked as SEQUEL -> PREQUEL. Walk backwards so
+  // Solo Leveling S2 becomes season 2, S3 becomes season 3, etc.
+  const query = `query ($id: Int) {
+    Media(id: $id, type: ANIME) {
+      id
+      format
+      title { romaji english native }
+      relations {
+        edges {
+          relationType
+          node { id format title { romaji english native } }
+        }
+      }
+    }
+  }`;
+
+  const walk = async (node, seen = new Set()) => {
+    if (!node?.id || seen.has(node.id)) return 1;
+    seen.add(node.id);
+    const data = await anilistRequest(query, { id: Number(node.id) });
+    const media = data?.Media;
+    const prequel = media?.relations?.edges?.find(edge =>
+      edge?.relationType === "PREQUEL" && edge?.node?.format === "TV"
+    )?.node;
+    if (!prequel) return 1;
+    return 1 + await walk(prequel, seen);
+  };
+
+  try {
+    const value = await walk(anime);
+    cache.set(anime.id, value);
+    return value;
+  } catch (_) {
+    // Safe fallback: parse explicit "Season N" from the title.
+    const text = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).join(" ");
+    const match = text.match(/(?:season|s)\s*(\d{1,2})\b/i);
+    const value = match ? Number(match[1]) : 1;
+    cache.set(anime.id, value);
+    return value;
+  }
+}
+
+async function findAnimeFromAniList(name) {
+  const query = `query ($search: String) {
+    Page(perPage: 12) {
+      media(search: $search, type: ANIME, format: TV, sort: SEARCH_MATCH) {
+        id
+        title { romaji english native }
+        episodes
+        season
+        seasonYear
+        status
+        nextAiringEpisode { episode airingAt }
+        siteUrl
+      }
+    }
+  }`;
+
+  const data = await anilistRequest(query, { search: name });
+  const candidates = Array.isArray(data?.Page?.media) ? data.Page.media : [];
+  if (!candidates.length) throw new Error(`Anime “${name}” was not found`);
+
+  const wanted = String(name).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const scored = candidates.map((anime, index) => {
+    const titles = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).map(v => String(v).toLowerCase());
+    const exact = titles.some(t => t === wanted) ? 1000 : 0;
+    const contains = titles.some(t => t.includes(wanted) || wanted.includes(t)) ? 300 : 0;
+    const year = Number(anime.seasonYear) || 0;
+    return { anime, score: exact + contains + year / 100000 - index / 1000000 };
+  }).sort((a, b) => b.score - a.score);
+
+  // Prefer the closest title first, then use the sequel chain to select the
+  // latest actual TV season of that title rather than a random search result.
+  const seasonCache = new Map();
+  const inspected = [];
+  for (const entry of scored.slice(0, 5)) {
+    const seasonNumber = await getAniListSeasonNumber(entry.anime, seasonCache);
+    inspected.push({ ...entry, seasonNumber });
+  }
+
+  inspected.sort((a, b) => {
+    if (b.seasonNumber !== a.seasonNumber) return b.seasonNumber - a.seasonNumber;
+    return b.score - a.score;
+  });
+  const anime = inspected[0]?.anime || candidates[0];
+  const seasonNumber = inspected[0]?.seasonNumber || 1;
   const season = anime.season ? String(anime.season).toLowerCase() : "";
   const seasonYear = Number(anime.seasonYear) || 0;
-  const seasonKey = season || seasonYear ? `${season || "season"}-${seasonYear || ""}` : "unknown";
+  const seasonKey = String(seasonNumber);
   const next = anime.nextAiringEpisode;
   const nextEpisode = next?.episode ? Number(next.episode) : 0;
   const episodes = Number(anime.episodes) || Math.max(0, nextEpisode - 1);
@@ -267,12 +346,14 @@ async function findAnimeFromAniList(name) {
   return {
     sourceId: String(anime.id),
     currentSeason: seasonKey,
+    seasonNumber,
     currentEpisode: episodes,
     episodeTotal: episodes,
     nextEpisode,
     latestEpisodeName: episodes ? `Episode ${episodes}` : "",
     url: anime.siteUrl || "",
-    status: anime.status || ""
+    status: anime.status || "",
+    seasonYear
   };
 }
 
@@ -290,12 +371,16 @@ async function findAnimeFromJikan(name) {
 
   const season = anime.season ? String(anime.season).toLowerCase() : "";
   const seasonYear = Number(anime.year) || Number(anime.aired?.from?.slice?.(0, 4)) || 0;
-  const seasonKey = season || seasonYear ? `${season || "season"}-${seasonYear || ""}` : "unknown";
+  const titleText = [anime.title, anime.title_english, anime.title_japanese].filter(Boolean).join(" ");
+  const explicitSeason = titleText.match(/(?:season|s)\s*(\d{1,2})\b/i);
+  const seasonNumber = explicitSeason ? Number(explicitSeason[1]) : 1;
+  const seasonKey = String(seasonNumber);
   const episodes = Number(anime.episodes) || 0;
 
   return {
     sourceId: String(anime.mal_id),
     currentSeason: seasonKey,
+    seasonNumber,
     currentEpisode: episodes,
     episodeTotal: episodes,
     nextEpisode: 0,
@@ -324,6 +409,7 @@ async function findAnime(name) {
     return {
       sourceId: `local-${slugify(name)}`,
       currentSeason: "local",
+      seasonNumber: 0,
       currentEpisode: 0,
       episodeTotal: 0,
       nextEpisode: 0,
@@ -341,6 +427,7 @@ function getMovieTrackerData(item) {
   return {
     sourceId: String(item.id),
     currentSeason: Number(item.parts) || 0,
+    seasonNumber: Number(item.parts) || 0,
     currentEpisode: Number(item.parts) || 0,
     episodeTotal: Number(item.parts) || 0,
     latestEpisodeName: Number(item.parts) ? `Part ${Number(item.parts)}` : "",
@@ -382,6 +469,7 @@ async function trackMediaItem(id) {
       type,
       sourceId: latest.sourceId,
       lastSeason: latest.currentSeason,
+      lastSeasonNumber: Number(latest.seasonNumber) || 0,
       lastEpisode: latest.currentEpisode,
       lastParts: Number(item.parts) || 0,
       lastCheckedAt: Date.now()
@@ -408,18 +496,27 @@ async function checkTrackedItems(silent = false, onlyType = "") {
         const latest = tracker.type === "movie"
           ? getMovieTrackerData(mediaItems.find(x => x.id === tracker.mediaId) || { id: tracker.mediaId, parts: tracker.lastParts })
           : await lookupTracker(tracker);
-        const newSeason = tracker.type !== "movie" && String(latest.currentSeason || "unknown") !== String(tracker.lastSeason || "unknown");
-        const newEpisode = tracker.type !== "movie" && Number(latest.currentEpisode || 0) > Number(tracker.lastEpisode || 0);
+        const latestSeasonNumber = Number(latest.seasonNumber) || 0;
+        const oldSeasonNumber = Number(tracker.lastSeasonNumber) || 0;
         const newPart = tracker.type === "movie" && latest.currentSeason > Number(tracker.lastParts || 0);
 
-        if (newSeason || newEpisode || newPart) {
+        // Existing trackers created by older versions did not store a numeric
+        // season. Establish their current season silently once, so they do not
+        // receive a false "Season 2" alert after this upgrade.
+        if (tracker.type !== "movie" && !oldSeasonNumber && latestSeasonNumber) {
+          tracker.lastSeasonNumber = latestSeasonNumber;
+          tracker.lastSeason = String(latestSeasonNumber);
+        }
+
+        const newSeason = tracker.type !== "movie" && oldSeasonNumber > 0 && latestSeasonNumber > oldSeasonNumber;
+
+        if (newSeason || newPart) {
           const label = newPart
-            ? `Part ${latest.currentSeason} is now in your collection`
-            : newSeason
-              ? `Season ${latest.currentSeason} is available`
-              : `New episode available (${latest.currentEpisode})`;
+            ? `Part ${latest.currentSeason} Released!`
+            : `Season ${latestSeasonNumber} Released!`;
           notifyTracker(`🔔 ${tracker.name}`, label, latest.url, tracker.type);
           tracker.lastSeason = latest.currentSeason;
+          tracker.lastSeasonNumber = latestSeasonNumber || tracker.lastSeasonNumber || 0;
           tracker.lastEpisode = latest.currentEpisode;
           tracker.lastParts = latest.currentSeason;
           changed++;
@@ -460,8 +557,8 @@ function renderTrackerLists() {
       const label = type === "movie"
         ? `${Number(t.lastParts || 0) || 0} part${Number(t.lastParts || 0) === 1 ? "" : "s"} saved`
         : type === "anime"
-          ? `${formatSeasonKey(t.lastSeason)} · Episode ${Number(t.lastEpisode || 0) || "—"}`
-          : `${formatSeasonKey(t.lastSeason)} · Episode ${Number(t.lastEpisode || 0) || "—"}`;
+          ? `Season ${Number(t.lastSeasonNumber || t.lastSeason || 0) || "—"}`
+          : `Season ${Number(t.lastSeasonNumber || t.lastSeason || 0) || "—"}`;
       return `<div class="tracked-item">
         <div class="tracked-item-main"><span class="tracked-type-badge">${type === "movie" ? "MOVIE" : type === "anime" ? "ANIME" : "SERIES"}</span><div><strong>${escapeHtml(t.name)}</strong><span>${label} · checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div></div>
         <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
