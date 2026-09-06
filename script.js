@@ -127,23 +127,104 @@ async function findTvMazeShow(name) {
   };
 }
 
-async function findAnime(name) {
-  const search = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(name)}&limit=1`);
-  if (!search.ok) throw new Error("Anime lookup failed");
-  const result = await search.json();
-  const anime = result.data?.[0];
+async function fetchWithTimeout(url, options = {}, timeout = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function findAnimeFromAniList(name) {
+  const query = `query ($search: String) {
+    Media(search: $search, type: ANIME) {
+      id
+      title { romaji english native }
+      episodes
+      season
+      seasonYear
+      status
+      nextAiringEpisode { episode airingAt }
+      siteUrl
+    }
+  }`;
+
+  const res = await fetchWithTimeout("https://graphql.anilist.co", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify({ query, variables: { search: name } })
+  });
+  if (!res.ok) throw new Error(`AniList HTTP ${res.status}`);
+  const payload = await res.json();
+  const anime = payload?.data?.Media;
   if (!anime) throw new Error(`Anime “${name}” was not found`);
-  const episodes = Number(anime.episodes) || 0;
+
+  const season = anime.season ? String(anime.season).toLowerCase() : "";
+  const seasonYear = Number(anime.seasonYear) || 0;
+  const seasonKey = season || seasonYear ? `${season || "season"}-${seasonYear || ""}` : "unknown";
+  const next = anime.nextAiringEpisode;
+  const nextEpisode = next?.episode ? Number(next.episode) : 0;
+  const episodes = Number(anime.episodes) || Math.max(0, nextEpisode - 1);
+
   return {
-    sourceId: String(anime.mal_id),
-    currentSeason: Number(anime.year) || 0,
+    sourceId: String(anime.id),
+    currentSeason: seasonKey,
     currentEpisode: episodes,
     episodeTotal: episodes,
+    nextEpisode,
     latestEpisodeName: episodes ? `Episode ${episodes}` : "",
-    url: anime.url || ""
+    url: anime.siteUrl || "",
+    status: anime.status || ""
   };
 }
 
+async function findAnimeFromJikan(name) {
+  // Jikan is kept as a fallback because it is occasionally rate-limited.
+  const search = await fetchWithTimeout(
+    `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(name)}&limit=1`,
+    {},
+    15000
+  );
+  if (!search.ok) throw new Error(`Jikan HTTP ${search.status}`);
+  const result = await search.json();
+  const anime = result.data?.[0];
+  if (!anime) throw new Error(`Anime “${name}” was not found`);
+
+  const season = anime.season ? String(anime.season).toLowerCase() : "";
+  const seasonYear = Number(anime.year) || Number(anime.aired?.from?.slice?.(0, 4)) || 0;
+  const seasonKey = season || seasonYear ? `${season || "season"}-${seasonYear || ""}` : "unknown";
+  const episodes = Number(anime.episodes) || 0;
+
+  return {
+    sourceId: String(anime.mal_id),
+    currentSeason: seasonKey,
+    currentEpisode: episodes,
+    episodeTotal: episodes,
+    nextEpisode: 0,
+    latestEpisodeName: episodes ? `Episode ${episodes}` : "",
+    url: anime.url || "",
+    status: anime.status || ""
+  };
+}
+
+async function findAnime(name) {
+  let aniListError = null;
+  try {
+    return await findAnimeFromAniList(name);
+  } catch (error) {
+    aniListError = error;
+    console.warn(`[Anime Tracker] AniList lookup failed for "${name}":`, error);
+  }
+
+  try {
+    return await findAnimeFromJikan(name);
+  } catch (jikanError) {
+    console.warn(`[Anime Tracker] Jikan fallback failed for "${name}":`, jikanError);
+    throw new Error("Anime lookup is temporarily unavailable. Please try Check Anime again.");
+  }
+}
 function getMovieTrackerData(item) {
   return {
     sourceId: String(item.id),
@@ -215,8 +296,8 @@ async function checkTrackedItems(silent = false, onlyType = "") {
         const latest = tracker.type === "movie"
           ? getMovieTrackerData(mediaItems.find(x => x.id === tracker.mediaId) || { id: tracker.mediaId, parts: tracker.lastParts })
           : await lookupTracker(tracker);
-        const newSeason = tracker.type !== "movie" && latest.currentSeason > Number(tracker.lastSeason || 0);
-        const newEpisode = tracker.type !== "movie" && latest.currentEpisode > Number(tracker.lastEpisode || 0);
+        const newSeason = tracker.type !== "movie" && String(latest.currentSeason || "unknown") !== String(tracker.lastSeason || "unknown");
+        const newEpisode = tracker.type !== "movie" && Number(latest.currentEpisode || 0) > Number(tracker.lastEpisode || 0);
         const newPart = tracker.type === "movie" && latest.currentSeason > Number(tracker.lastParts || 0);
 
         if (newSeason || newEpisode || newPart) {
@@ -244,6 +325,14 @@ async function checkTrackedItems(silent = false, onlyType = "") {
   }
 }
 
+function formatSeasonKey(value) {
+  const key = String(value || "unknown");
+  if (key === "unknown") return "Season —";
+  const [season, year] = key.split("-");
+  const seasonLabel = season && season !== "season" ? season.charAt(0).toUpperCase() + season.slice(1) : "Season";
+  return year ? `${seasonLabel} ${year}` : seasonLabel;
+}
+
 function renderTrackerLists() {
   ["movie", "anime", "webseries"].forEach(type => {
     const list = document.querySelector(`[data-tracker-list="${type}"]`);
@@ -259,8 +348,8 @@ function renderTrackerLists() {
       const label = type === "movie"
         ? `${Number(t.lastParts || 0) || 0} part${Number(t.lastParts || 0) === 1 ? "" : "s"} saved`
         : type === "anime"
-          ? `Episode ${Number(t.lastEpisode || 0) || "—"}`
-          : `Season ${Number(t.lastSeason || 0) || "—"} · Episode ${Number(t.lastEpisode || 0) || "—"}`;
+          ? `${formatSeasonKey(t.lastSeason)} · Episode ${Number(t.lastEpisode || 0) || "—"}`
+          : `${formatSeasonKey(t.lastSeason)} · Episode ${Number(t.lastEpisode || 0) || "—"}`;
       return `<div class="tracked-item">
         <div class="tracked-item-main"><span class="tracked-type-badge">${type === "movie" ? "MOVIE" : type === "anime" ? "ANIME" : "SERIES"}</span><div><strong>${escapeHtml(t.name)}</strong><span>${label} · checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div></div>
         <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
