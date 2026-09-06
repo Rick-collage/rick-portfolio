@@ -2184,7 +2184,24 @@ body::before{opacity:.08}
 .tracker-status.is-error { color:#fecaca; border-color:rgba(239,68,68,.25); background:rgba(239,68,68,.07); }
 .tracker-status.is-loading { color:#bae6fd; border-color:rgba(34,211,238,.22); }
 
-.tracker-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:10px; }
+.tracker-list {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:9px;
+  margin-top:10px;
+  /* Show 10 tracker cards (5 rows x 2 columns). More than 10 scrolls inside the panel. */
+  max-height:390px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding:2px 6px 2px 2px;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(139,92,246,.75) rgba(255,255,255,.05);
+  overscroll-behavior:contain;
+}
+.tracker-list::-webkit-scrollbar { width:8px; }
+.tracker-list::-webkit-scrollbar-track { background:rgba(255,255,255,.035); border-radius:10px; }
+.tracker-list::-webkit-scrollbar-thumb { background:linear-gradient(180deg,rgba(168,85,247,.9),rgba(59,130,246,.75)); border-radius:10px; border:2px solid transparent; background-clip:padding-box; }
+.tracker-list::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg,rgba(192,132,252,1),rgba(96,165,250,.95)); background-clip:padding-box; }
 .tracked-item { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; padding:12px 13px; border:1px solid rgba(255,255,255,.075); border-radius:13px; background:rgba(0,0,0,.16); transition:transform .2s ease, border-color .2s ease, background .2s ease; }
 .tracked-item:hover { transform:translateY(-2px); border-color:rgba(139,92,246,.32); background:rgba(139,92,246,.045); }
 .tracked-item-main { display:flex; align-items:center; gap:10px; min-width:0; }
@@ -2208,7 +2225,7 @@ body::before{opacity:.08}
   .tracker-notify-btn { width:100%; }
   .tracker-panel-head { grid-template-columns:auto 1fr; }
   .tracker-check-btn { grid-column:1/-1; width:100%; }
-  .tracker-list { grid-template-columns:1fr; }
+  .tracker-list { grid-template-columns:1fr; max-height:760px; }
 }
 @media (max-width: 600px) {
   .tracker-shell { padding:15px; border-radius:18px; }
