@@ -194,7 +194,17 @@
             <h3>Stay ahead of every release</h3>
             <p class="tracker-shell-subtitle">Each collection has its own tracker. Follow movie parts, anime episodes, or web-series seasons without mixing them together.</p>
           </div>
-          <button type="button" class="btn secondary tracker-notify-btn" data-tracker-action="notifications">🔔 Notifications</button>
+          <div class="tracker-notification-wrap">
+            <button type="button" class="btn secondary tracker-notify-btn" data-tracker-action="notifications" aria-expanded="false">🔔 Notifications <span class="notification-count" id="notificationCount" hidden>0</span></button>
+            <div class="notification-box" id="notificationBox" hidden>
+              <div class="notification-box-head">
+                <div><strong>Release Notifications</strong><span id="notificationSummary">Your new episode & season alerts stay here.</span></div>
+                <button type="button" class="notification-clear" id="clearNotifications">Clear all</button>
+              </div>
+              <div class="notification-list" id="notificationList"></div>
+              <div class="notification-empty" id="notificationEmpty">🔔<strong>No notifications yet</strong><span>When a tracked movie, anime or web series gets an update, it will stay here until you remove it.</span></div>
+            </div>
+          </div>
         </div>
 
         <div class="tracker-panel is-active" data-tracker-type="movie" id="movieTrackerPanel">

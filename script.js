@@ -57,6 +57,101 @@ let fetchedPosterObjectUrl = null;
  * Web Series use TVMaze season/episode data.
  */
 const TRACKING_KEY = "rickMediaTrackers";
+const NOTIFICATIONS_KEY = "rickReleaseNotifications";
+let releaseNotifications = loadReleaseNotifications();
+
+function loadReleaseNotifications() {
+  try {
+    const raw = localStorage.getItem(NOTIFICATIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function saveReleaseNotifications() {
+  try { localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(releaseNotifications)); } catch (_) {}
+}
+
+function escapeNotificationText(value) {
+  return escapeHtml(String(value ?? ""));
+}
+
+function addReleaseNotification({ title, body, type = "anime", url = "" }) {
+  const notification = {
+    id: (crypto.randomUUID ? crypto.randomUUID() : `note-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    title: String(title || "Release update"),
+    body: String(body || "A tracked title has a new update."),
+    type,
+    url: String(url || ""),
+    createdAt: Date.now()
+  };
+  releaseNotifications.unshift(notification);
+  // Keep a useful history without allowing the localStorage item to grow forever.
+  releaseNotifications = releaseNotifications.slice(0, 100);
+  saveReleaseNotifications();
+  renderReleaseNotifications();
+}
+
+function renderReleaseNotifications() {
+  const list = document.getElementById("notificationList");
+  const empty = document.getElementById("notificationEmpty");
+  const count = document.getElementById("notificationCount");
+  const summary = document.getElementById("notificationSummary");
+  if (!list || !empty) return;
+
+  const total = releaseNotifications.length;
+  if (count) {
+    count.textContent = total > 99 ? "99+" : String(total);
+    count.hidden = total === 0;
+  }
+  if (summary) summary.textContent = total ? `${total} saved alert${total === 1 ? "" : "s"}` : "Your new episode & season alerts stay here.";
+  empty.hidden = total > 0;
+  list.innerHTML = releaseNotifications.map(note => `
+    <article class="notification-card" data-notification-id="${escapeNotificationText(note.id)}">
+      <div class="notification-card-icon">${note.type === "movie" ? "🎬" : note.type === "anime" ? "🍥" : "📺"}</div>
+      <div class="notification-card-main">
+        <strong>${escapeNotificationText(note.title)}</strong>
+        <p>${escapeNotificationText(note.body)}</p>
+        <time>${new Date(note.createdAt).toLocaleString()}</time>
+        ${note.url ? `<a href="${escapeNotificationText(note.url)}" target="_blank" rel="noopener">Open source ↗</a>` : ""}
+      </div>
+      <button type="button" class="notification-remove" data-remove-notification="${escapeNotificationText(note.id)}" aria-label="Delete notification">×</button>
+    </article>
+  `).join("");
+
+  list.querySelectorAll("[data-remove-notification]").forEach(btn => btn.addEventListener("click", () => {
+    releaseNotifications = releaseNotifications.filter(n => n.id !== btn.dataset.removeNotification);
+    saveReleaseNotifications();
+    renderReleaseNotifications();
+  }));
+}
+
+function initNotificationBox() {
+  const wrap = document.querySelector(".tracker-notification-wrap");
+  const button = document.querySelector('[data-tracker-action="notifications"]');
+  const box = document.getElementById("notificationBox");
+  const clear = document.getElementById("clearNotifications");
+  if (!wrap || !button || !box) return;
+
+  renderReleaseNotifications();
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const opening = box.hidden;
+    box.hidden = !opening;
+    button.setAttribute("aria-expanded", String(opening));
+    if (opening) await requestTrackerNotifications(currentType);
+  });
+  box.addEventListener("click", event => event.stopPropagation());
+  document.addEventListener("click", () => {
+    box.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  });
+  clear?.addEventListener("click", () => {
+    releaseNotifications = [];
+    saveReleaseNotifications();
+    renderReleaseNotifications();
+  });
+}
 const TRACK_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 let trackedItems = loadTrackedItems();
 let trackerCheckRunning = false;
@@ -101,6 +196,7 @@ async function requestTrackerNotifications(type = currentType) {
 }
 
 function notifyTracker(title, body, url = "", type = currentType) {
+  addReleaseNotification({ title, body, type, url });
   if ("Notification" in window && Notification.permission === "granted") {
     try {
       const n = new Notification(title, { body, icon: "favicon.svg", tag: `rick-tracker-${type}-${title}` });
@@ -384,6 +480,7 @@ function setActiveTracker(type) {
 
 function initTracker() {
   renderTrackerLists();
+  initNotificationBox();
   setActiveTracker(currentType);
   document.querySelectorAll('[data-tracker-action="notifications"]').forEach(btn => btn.addEventListener("click", () => requestTrackerNotifications(currentType)));
   document.querySelectorAll(".tracker-check-btn").forEach(btn => btn.addEventListener("click", () => checkTrackedItems(false, btn.dataset.trackerType)));
