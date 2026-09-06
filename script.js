@@ -76,13 +76,15 @@ function escapeNotificationText(value) {
   return escapeHtml(String(value ?? ""));
 }
 
-function addReleaseNotification({ title, body, type = "anime", url = "" }) {
+function addReleaseNotification({ title, body, type = "anime", url = "", trackerId = "", releaseNumber = 0 }) {
   const notification = {
     id: (crypto.randomUUID ? crypto.randomUUID() : `note-${Date.now()}-${Math.random().toString(16).slice(2)}`),
     title: String(title || "Release update"),
     body: String(body || "A tracked title has a new update."),
     type,
     url: String(url || ""),
+    trackerId: String(trackerId || ""),
+    releaseNumber: Number(releaseNumber) || 0,
     createdAt: Date.now()
   };
   releaseNotifications.unshift(notification);
@@ -195,16 +197,66 @@ async function requestTrackerNotifications(type = currentType) {
   return false;
 }
 
-function notifyTracker(title, body, url = "", type = currentType) {
-  addReleaseNotification({ title, body, type, url });
+function showDesktopTrackerNotification(title, body, url = "", type = currentType) {
   if ("Notification" in window && Notification.permission === "granted") {
     try {
       const n = new Notification(title, { body, icon: "favicon.svg", tag: `rick-tracker-${type}-${title}` });
       n.onclick = () => { window.focus(); if (url) window.open(url, "_blank", "noopener"); n.close(); };
-      return;
+      return true;
     } catch (_) {}
   }
+  return false;
+}
+
+function notifyTracker(title, body, url = "", type = currentType, trackerId = "", releaseNumber = 0) {
+  addReleaseNotification({ title, body, type, url, trackerId, releaseNumber });
+  if (showDesktopTrackerNotification(title, body, url, type)) return;
   trackerStatus(`${title} — ${body}`, "success", type);
+}
+
+function normalizeTrackerTitle(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(?:season|s|part)\s*\d{1,2}\b/gi, " ")
+    .replace(/\b(?:season|part)\b/gi, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getCollectionReleaseNumber(item) {
+  const name = String(item?.name || "");
+  const explicit = name.match(/\b(?:season|s|part)\s*(\d{1,2})\b/i);
+  if (explicit) return Number(explicit[1]) || 0;
+  return Number(item?.parts) || 0;
+}
+
+function getCollectionReleaseNumberForTracker(tracker) {
+  const target = normalizeTrackerTitle(tracker.name);
+  const candidates = mediaItems.filter(item =>
+    item.type === tracker.type && normalizeTrackerTitle(item.name) === target
+  );
+  return candidates.reduce((max, item) => Math.max(max, getCollectionReleaseNumber(item)), 0);
+}
+
+function hasPendingReleaseNotification(trackerId, releaseNumber, type) {
+  return releaseNotifications.some(note =>
+    note.type === type && String(note.trackerId || "") === String(trackerId) && Number(note.releaseNumber) === Number(releaseNumber)
+  );
+}
+
+function clearResolvedReleaseNotifications(trackerId, currentCollectionNumber, type) {
+  const before = releaseNotifications.length;
+  releaseNotifications = releaseNotifications.filter(note => !(
+    note.type === type &&
+    String(note.trackerId || "") === String(trackerId) &&
+    Number(note.releaseNumber) > 0 &&
+    Number(note.releaseNumber) <= Number(currentCollectionNumber)
+  ));
+  if (releaseNotifications.length !== before) {
+    saveReleaseNotifications();
+    renderReleaseNotifications();
+  }
 }
 
 async function findTvMazeShow(name) {
@@ -496,31 +548,37 @@ async function checkTrackedItems(silent = false, onlyType = "") {
         const latest = tracker.type === "movie"
           ? getMovieTrackerData(mediaItems.find(x => x.id === tracker.mediaId) || { id: tracker.mediaId, parts: tracker.lastParts })
           : await lookupTracker(tracker);
-        const latestSeasonNumber = Number(latest.seasonNumber) || 0;
-        const oldSeasonNumber = Number(tracker.lastSeasonNumber) || 0;
-        const newPart = tracker.type === "movie" && latest.currentSeason > Number(tracker.lastParts || 0);
 
-        // Existing trackers created by older versions did not store a numeric
-        // season. Establish their current season silently once, so they do not
-        // receive a false "Season 2" alert after this upgrade.
-        if (tracker.type !== "movie" && !oldSeasonNumber && latestSeasonNumber) {
-          tracker.lastSeasonNumber = latestSeasonNumber;
-          tracker.lastSeason = String(latestSeasonNumber);
+        const latestReleaseNumber = Number(latest.seasonNumber) || Number(latest.currentSeason) || 0;
+        const oldReleaseNumber = Number(tracker.lastSeasonNumber) || 0;
+        const collectionReleaseNumber = getCollectionReleaseNumberForTracker(tracker);
+
+        // Once the user adds the released season/part to the website, the
+        // pending alert is resolved and tracking advances to that release.
+        if (latestReleaseNumber > 0 && collectionReleaseNumber >= latestReleaseNumber) {
+          clearResolvedReleaseNotifications(tracker.mediaId, collectionReleaseNumber, tracker.type);
+          if (latestReleaseNumber > oldReleaseNumber) {
+            tracker.lastSeasonNumber = latestReleaseNumber;
+            tracker.lastSeason = String(latestReleaseNumber);
+            changed++;
+          }
+        } else if (latestReleaseNumber > oldReleaseNumber) {
+          const title = `🔔 ${tracker.name}`;
+          const label = tracker.type === "movie"
+            ? `Part ${latestReleaseNumber} Released!`
+            : `Season ${latestReleaseNumber} Released!`;
+
+          // Keep the alert persistent: do not advance lastSeasonNumber until
+          // the user actually adds that release to the website.
+          if (!hasPendingReleaseNotification(tracker.mediaId, latestReleaseNumber, tracker.type)) {
+            notifyTracker(title, label, latest.url, tracker.type, tracker.mediaId, latestReleaseNumber);
+          } else {
+            // On a page refresh/check, remind the user again without creating
+            // duplicate cards in the notification inbox.
+            showDesktopTrackerNotification(title, label, latest.url, tracker.type);
+          }
         }
 
-        const newSeason = tracker.type !== "movie" && oldSeasonNumber > 0 && latestSeasonNumber > oldSeasonNumber;
-
-        if (newSeason || newPart) {
-          const label = newPart
-            ? `Part ${latest.currentSeason} Released!`
-            : `Season ${latestSeasonNumber} Released!`;
-          notifyTracker(`🔔 ${tracker.name}`, label, latest.url, tracker.type);
-          tracker.lastSeason = latest.currentSeason;
-          tracker.lastSeasonNumber = latestSeasonNumber || tracker.lastSeasonNumber || 0;
-          tracker.lastEpisode = latest.currentEpisode;
-          tracker.lastParts = latest.currentSeason;
-          changed++;
-        }
         tracker.lastCheckedAt = Date.now();
       } catch (error) {
         console.warn(`[Tracker] ${tracker.name}:`, error);
@@ -532,14 +590,6 @@ async function checkTrackedItems(silent = false, onlyType = "") {
   } finally {
     trackerCheckRunning = false;
   }
-}
-
-function formatSeasonKey(value) {
-  const key = String(value || "unknown");
-  if (key === "unknown") return "Season —";
-  const [season, year] = key.split("-");
-  const seasonLabel = season && season !== "season" ? season.charAt(0).toUpperCase() + season.slice(1) : "Season";
-  return year ? `${seasonLabel} ${year}` : seasonLabel;
 }
 
 function renderTrackerLists() {
