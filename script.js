@@ -263,7 +263,12 @@ async function findTvMazeShow(name) {
   const res = await fetch(`https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(name)}&embed[]=seasons&embed[]=episodes`);
   if (!res.ok) throw new Error("TVMaze lookup failed");
   const data = await res.json();
-  const seasons = Array.isArray(data._embedded?.seasons) ? data._embedded.seasons : [];
+  const allSeasons = Array.isArray(data._embedded?.seasons) ? data._embedded.seasons : [];
+  const now = new Date();
+  const seasons = allSeasons.filter(s => {
+    const premiered = s.premiereDate ? new Date(`${s.premiereDate}T00:00:00`) : null;
+    return !premiered || premiered <= now;
+  });
   const episodes = Array.isArray(data._embedded?.episodes) ? data._embedded.episodes : [];
   return {
     sourceId: String(data.id),
@@ -383,6 +388,7 @@ async function findAnimeFromAniList(name) {
         season
         seasonYear
         status
+        startDate { year month day }
         nextAiringEpisode { episode airingAt }
         siteUrl
       }
@@ -394,6 +400,7 @@ async function findAnimeFromAniList(name) {
   if (!candidates.length) throw new Error(`Anime “${name}” was not found`);
 
   const wanted = animeTitleBase(name);
+  const now = new Date();
   const scored = candidates.map((anime, index) => {
     const titles = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).map(v => String(v));
     const bases = titles.map(animeTitleBase);
@@ -401,12 +408,18 @@ async function findAnimeFromAniList(name) {
     const containsBase = bases.some(t => t.includes(wanted) || wanted.includes(t));
     const explicitSeason = Math.max(0, ...titles.map(parseSeasonNumberFromTitle));
     const year = Number(anime.seasonYear) || 0;
+    const startParts = anime.startDate || {};
+    const startDate = startParts.year
+      ? new Date(Date.UTC(Number(startParts.year), Math.max(0, Number(startParts.month || 1) - 1), Number(startParts.day || 1)))
+      : null;
+    const released = anime.status !== "NOT_YET_RELEASED" && (!startDate || startDate <= now);
     return {
       anime,
       score: (exactBase ? 1000 : 0) + (containsBase ? 300 : 0) + explicitSeason * 20 + year / 100000 - index / 1000000,
       exactBase,
       containsBase,
-      explicitSeason
+      explicitSeason,
+      released
     };
   }).sort((a, b) => b.score - a.score);
 
@@ -417,6 +430,9 @@ async function findAnimeFromAniList(name) {
   // title does not contain a number, such as a plain "Solo Leveling" result.
   for (const entry of scored.slice(0, 12)) {
     if (!entry.exactBase && !entry.containsBase) continue;
+    // Ignore announced/future seasons. Only seasons that have actually
+    // started (or finished) are eligible for a release notification.
+    if (!entry.released) continue;
     let relationSeason = 0;
     if (!entry.explicitSeason) {
       relationSeason = await getAniListSeasonNumber(entry.anime, seasonCache);
@@ -425,8 +441,12 @@ async function findAnimeFromAniList(name) {
   }
 
   if (!inspected.length) {
-    const fallback = scored[0];
-    inspected.push({ ...fallback, seasonNumber: fallback.explicitSeason || 1 });
+    const fallback = scored.find(entry => entry.released) || scored[0];
+    if (fallback && fallback.released) {
+      inspected.push({ ...fallback, seasonNumber: fallback.explicitSeason || 1 });
+    } else {
+      throw new Error(`No released season found for “${name}”`);
+    }
   }
 
   // Highest numbered matching TV season wins. This is what lets a tracked
@@ -453,7 +473,8 @@ async function findAnimeFromAniList(name) {
     latestEpisodeName: episodes ? `Episode ${episodes}` : "",
     url: anime.siteUrl || "",
     status: anime.status || "",
-    seasonYear: Number(anime.seasonYear) || 0
+    seasonYear: Number(anime.seasonYear) || 0,
+    startDate: anime.startDate || null
   };
 }
 
