@@ -298,6 +298,27 @@ async function anilistRequest(query, variables) {
   return payload?.data;
 }
 
+function parseAnimeSeasonNumberFromTitle(anime) {
+  const text = [anime?.title?.romaji, anime?.title?.english, anime?.title?.native]
+    .filter(Boolean).join(" ");
+  if (!text) return 0;
+
+  const arabic = text.match(/(?:season|s|part)\s*(\d{1,2})\b/i) ||
+    text.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+season\b/i);
+  if (arabic) return Number(arabic[1]) || 0;
+
+  const roman = text.match(/(?:\b|\s)(IV|III|II|I)(?:\b|\s|$)/i);
+  if (roman) {
+    const map = { I: 1, II: 2, III: 3, IV: 4 };
+    return map[String(roman[1]).toUpperCase()] || 0;
+  }
+
+  if (/\b(second|2nd)\s+season\b/i.test(text)) return 2;
+  if (/\b(third|3rd)\s+season\b/i.test(text)) return 3;
+  if (/\b(fourth|4th)\s+season\b/i.test(text)) return 4;
+  return 0;
+}
+
 async function getAniListSeasonNumber(anime, cache = new Map()) {
   if (!anime?.id) return 1;
   if (cache.has(anime.id)) return cache.get(anime.id);
@@ -331,14 +352,16 @@ async function getAniListSeasonNumber(anime, cache = new Map()) {
   };
 
   try {
-    const value = await walk(anime);
+    const chainValue = await walk(anime);
+    // Some AniList entries do not expose the full prequel chain. Title-based
+    // numbering (e.g. Overlord II / III / IV) is therefore used as an
+    // additional signal instead of relying on relations alone.
+    const titleValue = parseAnimeSeasonNumberFromTitle(anime);
+    const value = Math.max(chainValue || 1, titleValue || 0);
     cache.set(anime.id, value);
     return value;
   } catch (_) {
-    // Safe fallback: parse explicit "Season N" from the title.
-    const text = [anime.title?.romaji, anime.title?.english, anime.title?.native].filter(Boolean).join(" ");
-    const match = text.match(/(?:season|s)\s*(\d{1,2})\b/i);
-    const value = match ? Number(match[1]) : 1;
+    const value = parseAnimeSeasonNumberFromTitle(anime) || 1;
     cache.set(anime.id, value);
     return value;
   }
@@ -550,8 +573,13 @@ async function checkTrackedItems(silent = false, onlyType = "") {
           : await lookupTracker(tracker);
 
         const latestReleaseNumber = Number(latest.seasonNumber) || Number(latest.currentSeason) || 0;
-        const oldReleaseNumber = Number(tracker.lastSeasonNumber) || 0;
         const collectionReleaseNumber = getCollectionReleaseNumberForTracker(tracker);
+        // The website collection is the source of truth for what the user
+        // already owns. If an older tracker has no numeric baseline, use the
+        // saved collection count instead of silently establishing a new online
+        // baseline. This makes an existing Overlord S1-S3 entry immediately
+        // detect S4 after a refresh.
+        const oldReleaseNumber = Number(tracker.lastSeasonNumber) || collectionReleaseNumber || 0;
 
         // Once the user adds the released season/part to the website, the
         // pending alert is resolved and tracking advances to that release.
