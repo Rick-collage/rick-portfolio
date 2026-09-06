@@ -51,6 +51,188 @@ const OMDB_API_KEY = "3161b39f";
 let fetchedPosterBlob = null;
 let fetchedPosterObjectUrl = null;
 
+/* ===== Season / Episode Tracker =====
+ * Uses public TVMaze (web series) and Jikan/MyAnimeList (anime) APIs.
+ * Tracking is stored per browser. Notifications work while this site is open.
+ */
+const TRACKING_KEY = "rickMediaTrackers";
+const TRACK_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
+let trackedItems = loadTrackedItems();
+let trackerCheckRunning = false;
+
+function loadTrackedItems() {
+  try {
+    const raw = localStorage.getItem(TRACKING_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function saveTrackedItems() {
+  try { localStorage.setItem(TRACKING_KEY, JSON.stringify(trackedItems)); } catch (_) {}
+}
+
+function trackerStatus(message, state = "") {
+  const el = document.getElementById("trackerStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.className = "tracker-status" + (state ? ` is-${state}` : "");
+}
+
+function isTracked(id) { return trackedItems.some(x => x.mediaId === id); }
+
+async function requestTrackerNotifications() {
+  if (!("Notification" in window)) {
+    trackerStatus("This browser does not support desktop notifications.", "error");
+    return false;
+  }
+  const permission = await Notification.requestPermission();
+  if (permission === "granted") {
+    trackerStatus("Notifications enabled. You will be alerted about new seasons/episodes.", "success");
+    return true;
+  }
+  trackerStatus("Notifications are blocked. Allow them in your browser site settings.", "error");
+  return false;
+}
+
+function notifyTracker(title, body, url = "") {
+  if ("Notification" in window && Notification.permission === "granted") {
+    try {
+      const n = new Notification(title, { body, icon: "favicon.svg", tag: `rick-tracker-${title}` });
+      n.onclick = () => { window.focus(); if (url) window.open(url, "_blank", "noopener"); n.close(); };
+      return;
+    } catch (_) {}
+  }
+  // In-page fallback when browser notifications are unavailable.
+  trackerStatus(`${title} — ${body}`, "success");
+}
+
+async function findTvMazeShow(name) {
+  const res = await fetch(`https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(name)}&embed[]=seasons&embed[]=episodes`);
+  if (!res.ok) throw new Error("TVMaze lookup failed");
+  const data = await res.json();
+  return {
+    sourceId: String(data.id),
+    currentSeason: Array.isArray(data._embedded?.seasons) ? Math.max(0, ...data._embedded.seasons.map(s => Number(s.number) || 0)) : 0,
+    currentEpisode: Array.isArray(data._embedded?.episodes) ? Math.max(0, ...data._embedded.episodes.map(e => Number(e.id) || 0)) : 0,
+    latestEpisodeName: Array.isArray(data._embedded?.episodes) && data._embedded.episodes.length ? data._embedded.episodes[data._embedded.episodes.length - 1].name : "",
+    url: data.url || ""
+  };
+}
+
+async function findAnime(name) {
+  const search = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(name)}&limit=1`);
+  if (!search.ok) throw new Error("Anime lookup failed");
+  const result = await search.json();
+  const anime = result.data?.[0];
+  if (!anime) throw new Error(`Anime “${name}” was not found`);
+  const episodes = Number(anime.episodes) || 0;
+  return {
+    sourceId: String(anime.mal_id),
+    currentSeason: 0,
+    currentEpisode: episodes,
+    latestEpisodeName: episodes ? `Episode ${episodes}` : "",
+    url: anime.url || ""
+  };
+}
+
+async function lookupTracker(item) {
+  if (item.type === "webseries") return findTvMazeShow(item.name);
+  if (item.type === "anime") return findAnime(item.name);
+  throw new Error("Automatic movie sequel tracking needs a movie data provider/API key.");
+}
+
+async function trackMediaItem(id) {
+  const item = mediaItems.find(x => x.id === id);
+  if (!item || item.type === "movie") {
+    trackerStatus("Movies are kept in the collection, but automatic sequel tracking needs a movie API key.", "error");
+    return;
+  }
+  if (isTracked(id)) {
+    trackedItems = trackedItems.filter(x => x.mediaId !== id);
+    saveTrackedItems();
+    renderTrackedList();
+    await renderMedia();
+    trackerStatus(`Stopped tracking ${item.name}.`);
+    return;
+  }
+  trackerStatus(`Checking ${item.name}…`, "loading");
+  try {
+    const latest = await lookupTracker(item);
+    trackedItems.push({
+      mediaId: id,
+      name: item.name,
+      type: item.type,
+      sourceId: latest.sourceId,
+      lastSeason: latest.currentSeason,
+      lastEpisode: latest.currentEpisode,
+      lastCheckedAt: Date.now()
+    });
+    saveTrackedItems();
+    renderTrackedList();
+    await requestTrackerNotifications();
+    await renderMedia();
+    trackerStatus(`Tracking ${item.name}. Baseline saved — future changes will notify you.`, "success");
+  } catch (error) {
+    trackerStatus(`Could not start tracking ${item.name}: ${error.message}`, "error");
+  }
+}
+
+async function checkTrackedItems(silent = false) {
+  if (trackerCheckRunning || !trackedItems.length) return;
+  trackerCheckRunning = true;
+  if (!silent) trackerStatus("Checking your tracked shows…", "loading");
+  let changed = 0;
+  try {
+    for (const tracker of [...trackedItems]) {
+      try {
+        const latest = await lookupTracker(tracker);
+        const newSeason = latest.currentSeason > Number(tracker.lastSeason || 0);
+        const newEpisode = latest.currentEpisode > Number(tracker.lastEpisode || 0);
+        if (newSeason || newEpisode) {
+          const label = newSeason ? `Season ${latest.currentSeason} is available` : `New episode available (${latest.currentEpisode})`;
+          notifyTracker(`🔔 ${tracker.name}`, label, latest.url);
+          tracker.lastSeason = latest.currentSeason;
+          tracker.lastEpisode = latest.currentEpisode;
+          changed++;
+        }
+        tracker.lastCheckedAt = Date.now();
+      } catch (error) {
+        console.warn(`[Tracker] ${tracker.name}:`, error);
+      }
+    }
+    saveTrackedItems();
+    renderTrackedList();
+    if (!silent) trackerStatus(changed ? `${changed} update${changed > 1 ? "s" : ""} found.` : "Everything is up to date.", changed ? "success" : "");
+  } finally {
+    trackerCheckRunning = false;
+  }
+}
+
+function renderTrackedList() {
+  const list = document.getElementById("trackedList");
+  if (!list) return;
+  if (!trackedItems.length) {
+    list.innerHTML = `<div class="tracked-empty">No shows are being tracked yet. Use <strong>Track</strong> on an anime or web series card.</div>`;
+    return;
+  }
+  list.innerHTML = trackedItems.map(t => `
+    <div class="tracked-item">
+      <div><strong>${escapeHtml(t.name)}</strong><span>${t.type === "anime" ? "Anime" : "Web Series"} · last checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div>
+      <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
+    </div>`).join("");
+  list.querySelectorAll(".untrack-btn").forEach(btn => btn.addEventListener("click", () => trackMediaItem(btn.dataset.id)));
+}
+
+function initTracker() {
+  renderTrackedList();
+  document.getElementById("enableNotificationsBtn")?.addEventListener("click", requestTrackerNotifications);
+  document.getElementById("checkTrackersBtn")?.addEventListener("click", () => checkTrackedItems(false));
+  // Check on load, then periodically while the site remains open.
+  setTimeout(() => checkTrackedItems(true), 2500);
+  setInterval(() => checkTrackedItems(true), TRACK_CHECK_INTERVAL);
+}
+
 function getTypeLabel(type) {
   return type === "movie" ? "Movie" : type === "anime" ? "Anime" : "Web Series";
 }
@@ -836,6 +1018,7 @@ async function renderMedia() {
     const actions = document.createElement("div");
     actions.className = "media-actions";
     actions.innerHTML = `
+      ${item.type !== "movie" ? `<button class="small-btn track-btn ${isTracked(item.id) ? "is-tracked" : ""}" data-id="${escapeHtml(item.id)}" title="${isTracked(item.id) ? "Stop tracking" : "Track new seasons/episodes"}">${isTracked(item.id) ? "✓" : "🔔"}</button>` : ""}
       <button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit">✎</button>
       <button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete">🗑</button>
     `;
@@ -873,6 +1056,10 @@ async function renderMedia() {
 
   document.querySelectorAll(".delete-btn").forEach(btn => {
     btn.addEventListener("click", () => deleteMedia(btn.dataset.id));
+  });
+
+  document.querySelectorAll(".track-btn").forEach(btn => {
+    btn.addEventListener("click", () => trackMediaItem(btn.dataset.id));
   });
 }
 
@@ -1238,6 +1425,7 @@ async function initCollection() {
 }
 
 initCollection();
+initTracker();
 /* ——— Custom Cursor + Trail (Superhero) ——— */
 (function initCursor() {
   if (!window.matchMedia("(pointer: fine)").matches) return;

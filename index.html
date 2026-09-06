@@ -187,6 +187,22 @@
         </label>
       </div>
 
+      <div class="tracker-panel" id="trackerPanel">
+        <div class="tracker-head">
+          <div>
+            <p class="eyebrow">Tracker</p>
+            <h3>Never miss a new season</h3>
+            <p class="tracker-subtitle">Track anime and web series. When a new season or episode is detected, this browser can show a desktop notification.</p>
+          </div>
+          <div class="tracker-actions">
+            <button type="button" class="btn secondary" id="enableNotificationsBtn">🔔 Enable Notifications</button>
+            <button type="button" class="btn primary" id="checkTrackersBtn">↻ Check Now</button>
+          </div>
+        </div>
+        <div id="trackerStatus" class="tracker-status" aria-live="polite">Tracker ready.</div>
+        <div id="trackedList" class="tracked-list"></div>
+      </div>
+
       <div id="mediaGrid" class="media-grid"></div>
 
       <div id="emptyMedia" class="empty-media">
@@ -276,5 +292,8 @@
   </footer>
 
   <script src="script.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("tracker-sw.js").catch(() => {});
+  </script>
 </body>
 </html>
