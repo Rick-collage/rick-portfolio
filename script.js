@@ -51,9 +51,10 @@ const OMDB_API_KEY = "3161b39f";
 let fetchedPosterBlob = null;
 let fetchedPosterObjectUrl = null;
 
-/* ===== Season / Episode Tracker =====
- * Uses public TVMaze (web series) and Jikan/MyAnimeList (anime) APIs.
- * Tracking is stored per browser. Notifications work while this site is open.
+/* ===== Collection Trackers =====
+ * Separate tracker views for Movies, Anime and Web Series.
+ * Movies use the saved Parts value; Anime uses Jikan/MAL episode data;
+ * Web Series use TVMaze season/episode data.
  */
 const TRACKING_KEY = "rickMediaTrackers";
 const TRACK_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
@@ -72,8 +73,12 @@ function saveTrackedItems() {
   try { localStorage.setItem(TRACKING_KEY, JSON.stringify(trackedItems)); } catch (_) {}
 }
 
-function trackerStatus(message, state = "") {
-  const el = document.getElementById("trackerStatus");
+function getTrackerStatusEl(type) {
+  return document.querySelector(`[data-tracker-status="${type}"]`);
+}
+
+function trackerStatus(message, state = "", type = currentType) {
+  const el = getTrackerStatusEl(type);
   if (!el) return;
   el.textContent = message;
   el.className = "tracker-status" + (state ? ` is-${state}` : "");
@@ -81,41 +86,43 @@ function trackerStatus(message, state = "") {
 
 function isTracked(id) { return trackedItems.some(x => x.mediaId === id); }
 
-async function requestTrackerNotifications() {
+async function requestTrackerNotifications(type = currentType) {
   if (!("Notification" in window)) {
-    trackerStatus("This browser does not support desktop notifications.", "error");
+    trackerStatus("This browser does not support desktop notifications.", "error", type);
     return false;
   }
   const permission = await Notification.requestPermission();
   if (permission === "granted") {
-    trackerStatus("Notifications enabled. You will be alerted about new seasons/episodes.", "success");
+    trackerStatus("Notifications enabled. Release updates can now alert you.", "success", type);
     return true;
   }
-  trackerStatus("Notifications are blocked. Allow them in your browser site settings.", "error");
+  trackerStatus("Notifications are blocked. Allow them in your browser site settings.", "error", type);
   return false;
 }
 
-function notifyTracker(title, body, url = "") {
+function notifyTracker(title, body, url = "", type = currentType) {
   if ("Notification" in window && Notification.permission === "granted") {
     try {
-      const n = new Notification(title, { body, icon: "favicon.svg", tag: `rick-tracker-${title}` });
+      const n = new Notification(title, { body, icon: "favicon.svg", tag: `rick-tracker-${type}-${title}` });
       n.onclick = () => { window.focus(); if (url) window.open(url, "_blank", "noopener"); n.close(); };
       return;
     } catch (_) {}
   }
-  // In-page fallback when browser notifications are unavailable.
-  trackerStatus(`${title} — ${body}`, "success");
+  trackerStatus(`${title} — ${body}`, "success", type);
 }
 
 async function findTvMazeShow(name) {
   const res = await fetch(`https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(name)}&embed[]=seasons&embed[]=episodes`);
   if (!res.ok) throw new Error("TVMaze lookup failed");
   const data = await res.json();
+  const seasons = Array.isArray(data._embedded?.seasons) ? data._embedded.seasons : [];
+  const episodes = Array.isArray(data._embedded?.episodes) ? data._embedded.episodes : [];
   return {
     sourceId: String(data.id),
-    currentSeason: Array.isArray(data._embedded?.seasons) ? Math.max(0, ...data._embedded.seasons.map(s => Number(s.number) || 0)) : 0,
-    currentEpisode: Array.isArray(data._embedded?.episodes) ? Math.max(0, ...data._embedded.episodes.map(e => Number(e.id) || 0)) : 0,
-    latestEpisodeName: Array.isArray(data._embedded?.episodes) && data._embedded.episodes.length ? data._embedded.episodes[data._embedded.episodes.length - 1].name : "",
+    currentSeason: seasons.length ? Math.max(0, ...seasons.map(s => Number(s.number) || 0)) : 0,
+    currentEpisode: episodes.length ? Math.max(0, ...episodes.map(e => Number(e.number) || 0)) : 0,
+    episodeTotal: episodes.length,
+    latestEpisodeName: episodes.length ? episodes[episodes.length - 1].name : "",
     url: data.url || ""
   };
 }
@@ -129,71 +136,99 @@ async function findAnime(name) {
   const episodes = Number(anime.episodes) || 0;
   return {
     sourceId: String(anime.mal_id),
-    currentSeason: 0,
+    currentSeason: Number(anime.year) || 0,
     currentEpisode: episodes,
+    episodeTotal: episodes,
     latestEpisodeName: episodes ? `Episode ${episodes}` : "",
     url: anime.url || ""
   };
 }
 
+function getMovieTrackerData(item) {
+  return {
+    sourceId: String(item.id),
+    currentSeason: Number(item.parts) || 0,
+    currentEpisode: Number(item.parts) || 0,
+    episodeTotal: Number(item.parts) || 0,
+    latestEpisodeName: Number(item.parts) ? `Part ${Number(item.parts)}` : "",
+    url: ""
+  };
+}
+
 async function lookupTracker(item) {
+  if (item.type === "movie") return getMovieTrackerData(item);
   if (item.type === "webseries") return findTvMazeShow(item.name);
   if (item.type === "anime") return findAnime(item.name);
-  throw new Error("Automatic movie sequel tracking needs a movie data provider/API key.");
+  throw new Error("Unsupported tracker type");
+}
+
+function getTrackedItemsForType(type) {
+  return trackedItems.filter(item => item.type === type);
 }
 
 async function trackMediaItem(id) {
   const item = mediaItems.find(x => x.id === id);
-  if (!item || item.type === "movie") {
-    trackerStatus("Movies are kept in the collection, but automatic sequel tracking needs a movie API key.", "error");
-    return;
-  }
+  if (!item) return;
+  const type = item.type;
+
   if (isTracked(id)) {
     trackedItems = trackedItems.filter(x => x.mediaId !== id);
     saveTrackedItems();
-    renderTrackedList();
+    renderTrackerLists();
     await renderMedia();
-    trackerStatus(`Stopped tracking ${item.name}.`);
+    trackerStatus(`Stopped tracking ${item.name}.`, "", type);
     return;
   }
-  trackerStatus(`Checking ${item.name}…`, "loading");
+
+  trackerStatus(`Preparing ${item.name}…`, "loading", type);
   try {
     const latest = await lookupTracker(item);
     trackedItems.push({
       mediaId: id,
       name: item.name,
-      type: item.type,
+      type,
       sourceId: latest.sourceId,
       lastSeason: latest.currentSeason,
       lastEpisode: latest.currentEpisode,
+      lastParts: Number(item.parts) || 0,
       lastCheckedAt: Date.now()
     });
     saveTrackedItems();
-    renderTrackedList();
-    await requestTrackerNotifications();
+    renderTrackerLists();
+    await requestTrackerNotifications(type);
     await renderMedia();
-    trackerStatus(`Tracking ${item.name}. Baseline saved — future changes will notify you.`, "success");
+    trackerStatus(`Now tracking ${item.name}. Future release changes will be checked.`, "success", type);
   } catch (error) {
-    trackerStatus(`Could not start tracking ${item.name}: ${error.message}`, "error");
+    trackerStatus(`Could not start tracking ${item.name}: ${error.message}`, "error", type);
   }
 }
 
-async function checkTrackedItems(silent = false) {
+async function checkTrackedItems(silent = false, onlyType = "") {
   if (trackerCheckRunning || !trackedItems.length) return;
   trackerCheckRunning = true;
-  if (!silent) trackerStatus("Checking your tracked shows…", "loading");
+  if (!silent && onlyType) trackerStatus(`Checking your ${getTypeLabel(onlyType).toLowerCase()} trackers…`, "loading", onlyType);
   let changed = 0;
   try {
-    for (const tracker of [...trackedItems]) {
+    const targets = trackedItems.filter(t => !onlyType || t.type === onlyType);
+    for (const tracker of [...targets]) {
       try {
-        const latest = await lookupTracker(tracker);
-        const newSeason = latest.currentSeason > Number(tracker.lastSeason || 0);
-        const newEpisode = latest.currentEpisode > Number(tracker.lastEpisode || 0);
-        if (newSeason || newEpisode) {
-          const label = newSeason ? `Season ${latest.currentSeason} is available` : `New episode available (${latest.currentEpisode})`;
-          notifyTracker(`🔔 ${tracker.name}`, label, latest.url);
+        const latest = tracker.type === "movie"
+          ? getMovieTrackerData(mediaItems.find(x => x.id === tracker.mediaId) || { id: tracker.mediaId, parts: tracker.lastParts })
+          : await lookupTracker(tracker);
+        const newSeason = tracker.type !== "movie" && latest.currentSeason > Number(tracker.lastSeason || 0);
+        const newEpisode = tracker.type !== "movie" && latest.currentEpisode > Number(tracker.lastEpisode || 0);
+        const newPart = tracker.type === "movie" && latest.currentSeason > Number(tracker.lastParts || 0);
+
+        if (newSeason || newEpisode || newPart) {
+          const label = newPart
+            ? `Part ${latest.currentSeason} is now in your collection`
+            : newSeason
+              ? `Season ${latest.currentSeason} is available`
+              : `New episode available (${latest.currentEpisode})`;
+          notifyTracker(`🔔 ${tracker.name}`, label, latest.url, tracker.type);
           tracker.lastSeason = latest.currentSeason;
           tracker.lastEpisode = latest.currentEpisode;
+          tracker.lastParts = latest.currentSeason;
           changed++;
         }
         tracker.lastCheckedAt = Date.now();
@@ -202,33 +237,51 @@ async function checkTrackedItems(silent = false) {
       }
     }
     saveTrackedItems();
-    renderTrackedList();
-    if (!silent) trackerStatus(changed ? `${changed} update${changed > 1 ? "s" : ""} found.` : "Everything is up to date.", changed ? "success" : "");
+    renderTrackerLists();
+    if (!silent && onlyType) trackerStatus(changed ? `${changed} update${changed > 1 ? "s" : ""} found.` : "Everything is up to date.", changed ? "success" : "", onlyType);
   } finally {
     trackerCheckRunning = false;
   }
 }
 
-function renderTrackedList() {
-  const list = document.getElementById("trackedList");
-  if (!list) return;
-  if (!trackedItems.length) {
-    list.innerHTML = `<div class="tracked-empty">No shows are being tracked yet. Use <strong>Track</strong> on an anime or web series card.</div>`;
-    return;
-  }
-  list.innerHTML = trackedItems.map(t => `
-    <div class="tracked-item">
-      <div><strong>${escapeHtml(t.name)}</strong><span>${t.type === "anime" ? "Anime" : "Web Series"} · last checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div>
-      <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
-    </div>`).join("");
-  list.querySelectorAll(".untrack-btn").forEach(btn => btn.addEventListener("click", () => trackMediaItem(btn.dataset.id)));
+function renderTrackerLists() {
+  ["movie", "anime", "webseries"].forEach(type => {
+    const list = document.querySelector(`[data-tracker-list="${type}"]`);
+    const count = document.querySelector(`[data-tracker-count="${type}"]`);
+    if (!list) return;
+    const items = getTrackedItemsForType(type);
+    if (count) count.textContent = `${items.length} tracked`;
+    if (!items.length) {
+      list.innerHTML = `<div class="tracked-empty"><span>${type === "movie" ? "🎬" : type === "anime" ? "🍥" : "📺"}</span><div><strong>Nothing tracked yet</strong><small>Use the 🔔 button on a ${getTypeLabel(type).toLowerCase()} card to add it here.</small></div></div>`;
+      return;
+    }
+    list.innerHTML = items.map(t => {
+      const label = type === "movie"
+        ? `${Number(t.lastParts || 0) || 0} part${Number(t.lastParts || 0) === 1 ? "" : "s"} saved`
+        : type === "anime"
+          ? `Episode ${Number(t.lastEpisode || 0) || "—"}`
+          : `Season ${Number(t.lastSeason || 0) || "—"} · Episode ${Number(t.lastEpisode || 0) || "—"}`;
+      return `<div class="tracked-item">
+        <div class="tracked-item-main"><span class="tracked-type-badge">${type === "movie" ? "MOVIE" : type === "anime" ? "ANIME" : "SERIES"}</span><div><strong>${escapeHtml(t.name)}</strong><span>${label} · checked ${new Date(t.lastCheckedAt || Date.now()).toLocaleString()}</span></div></div>
+        <button type="button" class="small-btn untrack-btn" data-id="${escapeHtml(t.mediaId)}" title="Stop tracking">×</button>
+      </div>`;
+    }).join("");
+    list.querySelectorAll(".untrack-btn").forEach(btn => btn.addEventListener("click", () => trackMediaItem(btn.dataset.id)));
+  });
+}
+
+function setActiveTracker(type) {
+  document.querySelectorAll(".tracker-panel[data-tracker-type]").forEach(panel => panel.classList.toggle("is-active", panel.dataset.trackerType === type));
+  document.getElementById("trackerShell")?.classList.toggle("is-movie", type === "movie");
+  document.getElementById("trackerShell")?.classList.toggle("is-anime", type === "anime");
+  document.getElementById("trackerShell")?.classList.toggle("is-webseries", type === "webseries");
 }
 
 function initTracker() {
-  renderTrackedList();
-  document.getElementById("enableNotificationsBtn")?.addEventListener("click", requestTrackerNotifications);
-  document.getElementById("checkTrackersBtn")?.addEventListener("click", () => checkTrackedItems(false));
-  // Check on load, then periodically while the site remains open.
+  renderTrackerLists();
+  setActiveTracker(currentType);
+  document.querySelectorAll('[data-tracker-action="notifications"]').forEach(btn => btn.addEventListener("click", () => requestTrackerNotifications(currentType)));
+  document.querySelectorAll(".tracker-check-btn").forEach(btn => btn.addEventListener("click", () => checkTrackedItems(false, btn.dataset.trackerType)));
   setTimeout(() => checkTrackedItems(true), 2500);
   setInterval(() => checkTrackedItems(true), TRACK_CHECK_INTERVAL);
 }
@@ -1018,7 +1071,7 @@ async function renderMedia() {
     const actions = document.createElement("div");
     actions.className = "media-actions";
     actions.innerHTML = `
-      ${item.type !== "movie" ? `<button class="small-btn track-btn ${isTracked(item.id) ? "is-tracked" : ""}" data-id="${escapeHtml(item.id)}" title="${isTracked(item.id) ? "Stop tracking" : "Track new seasons/episodes"}">${isTracked(item.id) ? "✓" : "🔔"}</button>` : ""}
+      <button class="small-btn track-btn ${isTracked(item.id) ? "is-tracked" : ""}" data-id="${escapeHtml(item.id)}" title="${isTracked(item.id) ? "Stop tracking" : `Track ${getTypeLabel(item.type).toLowerCase()}`}">${isTracked(item.id) ? "✓" : "🔔"}</button>
       <button class="small-btn edit-btn" data-id="${escapeHtml(item.id)}" title="Edit">✎</button>
       <button class="small-btn delete-btn" data-id="${escapeHtml(item.id)}" title="Delete">🗑</button>
     `;
@@ -1184,6 +1237,8 @@ mediaTabs.forEach(tab => {
     mediaSearch.value = "";
     mediaSearch.placeholder = `Search ${getTypeLabel(currentType).toLowerCase()}...`;
     mediaSearch.parentElement.classList.remove("has-value");
+    setActiveTracker(currentType);
+    renderTrackerLists();
     renderMedia();
   });
 });

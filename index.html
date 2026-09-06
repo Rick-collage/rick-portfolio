@@ -187,20 +187,69 @@
         </label>
       </div>
 
-      <div class="tracker-panel" id="trackerPanel">
-        <div class="tracker-head">
+      <div class="tracker-shell" id="trackerShell">
+        <div class="tracker-topline">
           <div>
-            <p class="eyebrow">Tracker</p>
-            <h3>Never miss a new season</h3>
-            <p class="tracker-subtitle">Track anime and web series. When a new season or episode is detected, this browser can show a desktop notification.</p>
+            <p class="eyebrow">My Trackers</p>
+            <h3>Stay ahead of every release</h3>
+            <p class="tracker-shell-subtitle">Each collection has its own tracker. Follow movie parts, anime episodes, or web-series seasons without mixing them together.</p>
           </div>
-          <div class="tracker-actions">
-            <button type="button" class="btn secondary" id="enableNotificationsBtn">🔔 Enable Notifications</button>
-            <button type="button" class="btn primary" id="checkTrackersBtn">↻ Check Now</button>
-          </div>
+          <button type="button" class="btn secondary tracker-notify-btn" data-tracker-action="notifications">🔔 Notifications</button>
         </div>
-        <div id="trackerStatus" class="tracker-status" aria-live="polite">Tracker ready.</div>
-        <div id="trackedList" class="tracked-list"></div>
+
+        <div class="tracker-panel is-active" data-tracker-type="movie" id="movieTrackerPanel">
+          <div class="tracker-panel-head">
+            <div class="tracker-icon">🎬</div>
+            <div class="tracker-panel-title">
+              <p class="eyebrow">Movie Tracker</p>
+              <h4>Movie Parts & Sequels</h4>
+              <p>Track the part count you saved in your collection. When you add a new part, the tracker can alert you.</p>
+            </div>
+            <button type="button" class="btn primary tracker-check-btn" data-tracker-type="movie">↻ Check Movies</button>
+          </div>
+          <div class="tracker-stat-row">
+            <span class="tracker-count" data-tracker-count="movie">0 tracked</span>
+            <span class="tracker-note">Part changes are detected from your collection.</span>
+          </div>
+          <div class="tracker-status" data-tracker-status="movie" aria-live="polite">Movie tracker ready.</div>
+          <div class="tracked-list tracker-list" data-tracker-list="movie"></div>
+        </div>
+
+        <div class="tracker-panel" data-tracker-type="anime" id="animeTrackerPanel">
+          <div class="tracker-panel-head">
+            <div class="tracker-icon">🍥</div>
+            <div class="tracker-panel-title">
+              <p class="eyebrow">Anime Tracker</p>
+              <h4>New Episodes & Seasons</h4>
+              <p>Check episode counts from MyAnimeList data and get notified when a tracked anime moves forward.</p>
+            </div>
+            <button type="button" class="btn primary tracker-check-btn" data-tracker-type="anime">↻ Check Anime</button>
+          </div>
+          <div class="tracker-stat-row">
+            <span class="tracker-count" data-tracker-count="anime">0 tracked</span>
+            <span class="tracker-note">Episode updates are checked automatically while the site is open.</span>
+          </div>
+          <div class="tracker-status" data-tracker-status="anime" aria-live="polite">Anime tracker ready.</div>
+          <div class="tracked-list tracker-list" data-tracker-list="anime"></div>
+        </div>
+
+        <div class="tracker-panel" data-tracker-type="webseries" id="seriesTrackerPanel">
+          <div class="tracker-panel-head">
+            <div class="tracker-icon">📺</div>
+            <div class="tracker-panel-title">
+              <p class="eyebrow">Web Series Tracker</p>
+              <h4>New Seasons & Episodes</h4>
+              <p>Use TVMaze data to watch your series and receive a notification when a newer episode or season appears.</p>
+            </div>
+            <button type="button" class="btn primary tracker-check-btn" data-tracker-type="webseries">↻ Check Series</button>
+          </div>
+          <div class="tracker-stat-row">
+            <span class="tracker-count" data-tracker-count="webseries">0 tracked</span>
+            <span class="tracker-note">TVMaze checks run every 6 hours while the site is open.</span>
+          </div>
+          <div class="tracker-status" data-tracker-status="webseries" aria-live="polite">Web-series tracker ready.</div>
+          <div class="tracked-list tracker-list" data-tracker-list="webseries"></div>
+        </div>
       </div>
 
       <div id="mediaGrid" class="media-grid"></div>
