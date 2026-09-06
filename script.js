@@ -222,9 +222,25 @@ async function findAnime(name) {
     return await findAnimeFromJikan(name);
   } catch (jikanError) {
     console.warn(`[Anime Tracker] Jikan fallback failed for "${name}":`, jikanError);
-    throw new Error("Anime lookup is temporarily unavailable. Please try Check Anime again.");
+    // Never block tracking just because an external API is unavailable.
+    // The tracker is created from the local collection and will retry online
+    // lookup during the next manual/automatic check.
+    return {
+      sourceId: `local-${slugify(name)}`,
+      currentSeason: "local",
+      currentEpisode: 0,
+      episodeTotal: 0,
+      nextEpisode: 0,
+      latestEpisodeName: "",
+      url: "",
+      status: "Local baseline"
+    };
   }
 }
+function slugify(value) {
+  return String(value || "anime").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "anime";
+}
+
 function getMovieTrackerData(item) {
   return {
     sourceId: String(item.id),
